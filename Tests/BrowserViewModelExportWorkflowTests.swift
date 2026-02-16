@@ -62,10 +62,43 @@ final class BrowserViewModelExportWorkflowTests: XCTestCase {
 
         viewModel.select(asset)
         viewModel.tagSelectedAsKeep()
+        viewModel.exportDestination.shootName = "Test"
         viewModel.setExportBasePath("")
         viewModel.startExportQueue()
 
         XCTAssertEqual(viewModel.exportStatus, "Choose export path and preset first.")
+    }
+
+    func testMultiSelectTaggingAndUndoRedo() async throws {
+        let fixture = try makeFixture(name: "multi-select-tagging", photoCount: 3)
+        let viewModel = BrowserViewModel(mockVolumes: [fixture.volume])
+        try await waitForAssets(in: viewModel, expectedCount: 3)
+        clearQueue(in: viewModel)
+
+        let visible = viewModel.visiblePhotoAssets
+        guard let first = visible.first, let last = visible.last else {
+            XCTFail("Missing loaded assets")
+            return
+        }
+
+        viewModel.select(first)
+        viewModel.selectRange(to: last)
+        XCTAssertEqual(viewModel.selectedAssetIDs.count, 3)
+
+        viewModel.tagSelectedAsKeep()
+        XCTAssertEqual(visible.filter { viewModel.tag(for: $0) == .keep }.count, 3)
+        XCTAssertEqual(viewModel.exportQueue.filter { !$0.state.isTerminal }.count, 3)
+
+        viewModel.undoTagEdit()
+        XCTAssertEqual(visible.filter { viewModel.tag(for: $0) == .keep }.count, 0)
+        XCTAssertEqual(viewModel.exportQueue.filter { !$0.state.isTerminal }.count, 0)
+
+        viewModel.redoTagEdit()
+        XCTAssertEqual(visible.filter { viewModel.tag(for: $0) == .keep }.count, 3)
+        XCTAssertEqual(viewModel.exportQueue.filter { !$0.state.isTerminal }.count, 3)
+
+        viewModel.selectAllVisibleAssets()
+        XCTAssertEqual(viewModel.selectedAssetIDs.count, visible.count)
     }
 
     private func clearQueue(in viewModel: BrowserViewModel) {

@@ -65,12 +65,12 @@ struct VolumeSidebar: View {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.canCreateDirectories = false
         panel.prompt = "Add Library"
-        panel.message = "Choose a folder that contains your photo folders."
-        if panel.runModal() == .OK, let url = panel.url {
-            viewModel.addUserLibraryFolder(url)
+        panel.message = "Choose one or more folders that contain your photo folders."
+        if panel.runModal() == .OK {
+            viewModel.addUserLibraryFolders(panel.urls)
         }
     }
 }
@@ -99,7 +99,9 @@ struct BrowserDetailView: View {
     @ObservedObject var viewModel: BrowserViewModel
     @State private var keyMonitor: Any?
     @State private var showsExportQueue = false
-    @State private var showsAdjustmentsPanel = true
+    @State private var showsAdjustmentsPanel = false
+    @State private var showsToolbarShootNameHint = false
+    @FocusState private var toolbarShootNameFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -190,10 +192,19 @@ struct BrowserDetailView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 150)
                     .accessibilityLabel("Shoot name")
-                    
+                    .focused($toolbarShootNameFocused)
+                    .popover(isPresented: $showsToolbarShootNameHint, arrowEdge: .top) {
+                        Text("Enter folder name before export.")
+                            .padding(10)
+                    }
+                    .onChange(of: viewModel.exportDestination.shootName) { value in
+                        if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            showsToolbarShootNameHint = false
+                        }
+                    }
+
                     Button {
-                        viewModel.enqueueSelectedForExport()
-                        viewModel.startExportQueue()
+                        runQuickExport()
                     } label: {
                         Image(systemName: "square.and.arrow.up")
                     }
@@ -220,11 +231,7 @@ struct BrowserDetailView: View {
         guard event.type == .keyDown else { return false }
         if isTextInputFocused() { return false }
 
-        if event.modifierFlags.contains(.command),
-           !event.modifierFlags.contains(.control),
-           !event.modifierFlags.contains(.option),
-           event.charactersIgnoringModifiers?.lowercased() == "e" {
-            showsAdjustmentsPanel.toggle()
+        if handleCommandShortcut(event) {
             return true
         }
 
@@ -252,6 +259,59 @@ struct BrowserDetailView: View {
             }
             return false
         }
+    }
+
+    private func handleCommandShortcut(_ event: NSEvent) -> Bool {
+        guard event.modifierFlags.contains(.command),
+              !event.modifierFlags.contains(.control),
+              !event.modifierFlags.contains(.option),
+              let key = event.charactersIgnoringModifiers?.lowercased() else {
+            return false
+        }
+
+        switch key {
+        case "e":
+            if event.modifierFlags.contains(.shift) {
+                return false
+            }
+            showsAdjustmentsPanel.toggle()
+            return true
+        case "a":
+            if event.modifierFlags.contains(.shift) {
+                return false
+            }
+            viewModel.selectAllVisibleAssets()
+            return true
+        case "z":
+            if event.modifierFlags.contains(.shift) {
+                guard viewModel.canRedoTagEdit else { return false }
+                viewModel.redoTagEdit()
+            } else {
+                guard viewModel.canUndoTagEdit else { return false }
+                viewModel.undoTagEdit()
+            }
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func runQuickExport() {
+        guard isFolderNameValid else {
+            showToolbarShootNamePrompt()
+            return
+        }
+        viewModel.enqueueSelectedForExport()
+        viewModel.startExportQueue()
+    }
+
+    private var isFolderNameValid: Bool {
+        !viewModel.exportDestination.shootName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func showToolbarShootNamePrompt() {
+        showsToolbarShootNameHint = true
+        toolbarShootNameFocused = true
     }
 
     private func isTextInputFocused() -> Bool {
@@ -336,13 +396,18 @@ struct PhotoGridPane: View {
                                     ForEach(section.assets) { asset in
                                         ThumbnailCell(
                                             asset: asset,
-                                            isSelected: asset.id == viewModel.selectedAssetID,
+                                            isSelected: viewModel.selectedAssetIDs.contains(asset.id),
                                             tag: viewModel.tag(for: asset),
                                             rating: viewModel.rating(for: asset)
                                         )
                                         .id(asset.id)
                                         .onTapGesture {
-                                            viewModel.select(asset)
+                                            let flags = NSApp.currentEvent?.modifierFlags ?? []
+                                            if flags.contains(.shift) {
+                                                viewModel.selectRange(to: asset)
+                                            } else {
+                                                viewModel.select(asset)
+                                            }
                                         }
                                         .contextMenu {
                                             Button("Tag Green") {
@@ -1236,6 +1301,8 @@ struct ExportQueueSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showsPresetEditor = false
     @State private var presetDraft = ExportPreset(name: "New Preset", fileFormat: .jpeg, longEdgePixels: 3000, quality: 0.9)
+    @State private var showsShootNameHint = false
+    @FocusState private var shootNameFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1278,6 +1345,16 @@ struct ExportQueueSheet: View {
                 TextField("Shoot name", text: $viewModel.exportDestination.shootName)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 180)
+                    .focused($shootNameFocused)
+                    .popover(isPresented: $showsShootNameHint, arrowEdge: .top) {
+                        Text("Enter folder name before export.")
+                            .padding(10)
+                    }
+                    .onChange(of: viewModel.exportDestination.shootName) { value in
+                        if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            showsShootNameHint = false
+                        }
+                    }
 
                 TextField("Subfolder template", text: $viewModel.exportDestination.subfolderTemplate)
                     .textFieldStyle(.roundedBorder)
@@ -1320,7 +1397,7 @@ struct ExportQueueSheet: View {
                         }
                         .accessibilityLabel("Add green-tagged photos to export queue")
                         Button("Start Queue") {
-                            viewModel.startExportQueue()
+                            startQueueWithValidation()
                         }
                         .disabled(!viewModel.hasValidExportDestination || viewModel.isExporting)
                         .accessibilityLabel("Start export queue")
@@ -1437,6 +1514,15 @@ struct ExportQueueSheet: View {
                 }
             }
         }
+    }
+
+    private func startQueueWithValidation() {
+        guard !viewModel.exportDestination.shootName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            showsShootNameHint = true
+            shootNameFocused = true
+            return
+        }
+        viewModel.startExportQueue()
     }
 
     private func chooseExportPath() {

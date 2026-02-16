@@ -17,6 +17,7 @@ final class BrowserViewModel: ObservableObject {
     private static let ratingsDefaultsKey = "darkroom.asset.ratings.v1"
     private static let userLibraryPathsDefaultsKey = "darkroom.userLibraryPaths.v1"
     private static let starterPresetRestoreOnceDefaultsKey = "darkroom.exportStarterPresetRestoreOnce.v1"
+    private static let uiTestFixturePathMarker = "/darkroom-viewmodel-tests-"
 
     enum AssetFilter: String, CaseIterable, Identifiable {
         case all
@@ -36,6 +37,12 @@ final class BrowserViewModel: ObservableObject {
         }
     }
 
+    private struct TagEditCommand {
+        let assetIDs: [PhotoAsset.ID]
+        let previousTags: [PhotoAsset.ID: PhotoTag]
+        let updatedTag: PhotoTag?
+    }
+
     @Published private(set) var volumes: [Volume] = []
     @Published private(set) var libraryVolume: Volume?
     @Published private(set) var userLibraryVolumes: [Volume] = []
@@ -47,6 +54,7 @@ final class BrowserViewModel: ObservableObject {
     }
     @Published private(set) var photoAssets: [PhotoAsset] = []
     @Published var selectedAssetID: PhotoAsset.ID?
+    @Published private(set) var selectedAssetIDs: Set<PhotoAsset.ID> = []
     @Published private(set) var tags: [PhotoAsset.ID: PhotoTag] = [:]
     @Published private(set) var ratings: [PhotoAsset.ID: Int] = [:]
     @Published var assetFilter: AssetFilter = .all {
@@ -103,6 +111,10 @@ final class BrowserViewModel: ObservableObject {
     private var preferenceObserver: NSObjectProtocol?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var cancellables: Set<AnyCancellable> = []
+    private var selectionAnchorAssetID: PhotoAsset.ID?
+    private var tagUndoStack: [TagEditCommand] = []
+    private var tagRedoStack: [TagEditCommand] = []
+    private let maxTagHistory = 100
 
     var selectedAsset: PhotoAsset? {
         guard let selectedAssetID else { return nil }
@@ -143,6 +155,9 @@ final class BrowserViewModel: ObservableObject {
         photoAssets.filter { tags[$0.id] == .keep }
     }
 
+    var canUndoTagEdit: Bool { !tagUndoStack.isEmpty }
+    var canRedoTagEdit: Bool { !tagRedoStack.isEmpty }
+
     init(volumeWatcher: VolumeWatcher? = nil, libraryManager: LibraryManager = .shared, mockVolumes: [Volume]? = nil) {
         let watcher = volumeWatcher ?? VolumeWatcher()
         self.volumeWatcher = watcher
@@ -151,7 +166,7 @@ final class BrowserViewModel: ObservableObject {
         let exportPath = UserDefaults.standard.string(forKey: Self.lastExportPathDefaultsKey) ?? ""
         self.exportDestination.basePath = exportPath
         self.exportDestination.subfolderTemplate = UserDefaults.standard.string(forKey: Self.exportSubfolderTemplateDefaultsKey) ?? "{date}-{shoot}"
-        self.exportDestination.shootName = UserDefaults.standard.string(forKey: Self.exportShootNameDefaultsKey) ?? "Session"
+        self.exportDestination.shootName = UserDefaults.standard.string(forKey: Self.exportShootNameDefaultsKey) ?? ""
         self.exportPresets = Self.loadPersistedExportPresets() ?? ExportPreset.starterPresets
         self.restoreMissingStarterPresetsOnceIfNeeded()
         if let selectedPresetRaw = UserDefaults.standard.string(forKey: Self.selectedExportPresetDefaultsKey),
@@ -222,6 +237,7 @@ final class BrowserViewModel: ObservableObject {
 
     func refreshVolumes() {
         volumeWatcher.refresh()
+        loadAssetsForSelection()
     }
 
     func addUserLibraryFolder(_ folderURL: URL) {
@@ -255,6 +271,43 @@ final class BrowserViewModel: ObservableObject {
         selectedVolume = newVolume
     }
 
+    func addUserLibraryFolders(_ folderURLs: [URL]) {
+        var lastAddedOrExisting: Volume?
+        for folderURL in folderURLs {
+            let standardized = folderURL.standardizedFileURL
+            guard Self.isDirectory(at: standardized) else {
+                continue
+            }
+            if let libraryVolume,
+               libraryVolume.url.standardizedFileURL.path == standardized.path {
+                lastAddedOrExisting = libraryVolume
+                continue
+            }
+            if let existing = userLibraryVolumes.first(where: { $0.url.standardizedFileURL.path == standardized.path }) {
+                lastAddedOrExisting = existing
+                continue
+            }
+
+            let newVolume = Volume(
+                url: standardized,
+                name: standardized.lastPathComponent,
+                isRemovable: false,
+                isInternal: true,
+                capacity: nil,
+                isBuiltInLibrary: false,
+                isUserLibrary: true
+            )
+            userLibraryVolumes.append(newVolume)
+            lastAddedOrExisting = newVolume
+        }
+
+        userLibraryVolumes.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        persistUserLibraries()
+        if let lastAddedOrExisting {
+            selectedVolume = lastAddedOrExisting
+        }
+    }
+
     func removeUserLibrary(_ volume: Volume) {
         guard volume.isUserLibrary else { return }
         userLibraryVolumes.removeAll { $0.url.standardizedFileURL.path == volume.url.standardizedFileURL.path }
@@ -265,15 +318,54 @@ final class BrowserViewModel: ObservableObject {
     }
 
     func select(_ asset: PhotoAsset) {
+        selectSingleAsset(asset.id)
+    }
+
+    func selectRange(to asset: PhotoAsset) {
+        let visible = visiblePhotoAssets
+        guard let targetIndex = visible.firstIndex(where: { $0.id == asset.id }) else { return }
+
+        let anchorID = selectionAnchorAssetID ?? selectedAssetID ?? selectedAssetIDs.first
+        guard let anchorID,
+              let anchorIndex = visible.firstIndex(where: { $0.id == anchorID }) else {
+            selectSingleAsset(asset.id)
+            return
+        }
+
+        let lower = min(anchorIndex, targetIndex)
+        let upper = max(anchorIndex, targetIndex)
+        let rangeIDs = Set(visible[lower...upper].map(\.id))
+        selectedAssetIDs = rangeIDs
         selectedAssetID = asset.id
     }
 
+    func selectAllVisibleAssets() {
+        let visible = visiblePhotoAssets
+        guard !visible.isEmpty else {
+            selectedAssetID = nil
+            selectedAssetIDs = []
+            selectionAnchorAssetID = nil
+            return
+        }
+
+        let allIDs = Set(visible.map(\.id))
+        selectedAssetIDs = allIDs
+        if let selectedAssetID, allIDs.contains(selectedAssetID) {
+            selectionAnchorAssetID = selectedAssetID
+            return
+        }
+        if let firstID = visible.first?.id {
+            selectedAssetID = firstID
+            selectionAnchorAssetID = firstID
+        }
+    }
+
     func tagSelectedAsKeep() {
-        setSelectedTag(.keep)
+        applyTagChange(.keep, to: targetAssetIDsForTagging())
     }
 
     func tagSelectedAsReject() {
-        setSelectedTag(.reject)
+        applyTagChange(.reject, to: targetAssetIDsForTagging())
     }
 
     func tag(for asset: PhotoAsset) -> PhotoTag? {
@@ -353,6 +445,10 @@ final class BrowserViewModel: ObservableObject {
 
     func startExportQueue() {
         guard !isExporting else { return }
+        guard !exportDestination.shootName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            exportStatus = "Enter folder name first."
+            return
+        }
         guard hasValidExportDestination else {
             exportStatus = "Choose export path and preset first."
             return
@@ -495,11 +591,22 @@ final class BrowserViewModel: ObservableObject {
     }
 
     func clearSelectedTag() {
-        guard let selectedAssetID else { return }
-        tags[selectedAssetID] = nil
-        clearFinderColorTags(for: selectedAssetID)
-        removePendingQueueEntry(for: selectedAssetID)
+        applyTagChange(nil, to: targetAssetIDsForTagging())
+    }
+
+    func undoTagEdit() {
+        guard let command = tagUndoStack.popLast() else { return }
+        for assetID in command.assetIDs {
+            applyTag(command.previousTags[assetID], to: assetID)
+        }
+        tagRedoStack.append(command)
         ensureSelectedAssetVisible()
+    }
+
+    func redoTagEdit() {
+        guard let command = tagRedoStack.popLast() else { return }
+        applyTagChange(command.updatedTag, to: command.assetIDs, recordHistory: false)
+        tagUndoStack.append(command)
     }
 
     func setSelectedRating(_ value: Int) {
@@ -654,8 +761,12 @@ final class BrowserViewModel: ObservableObject {
         guard let volume = selectedVolume, let root = volume.browsingRoot else {
             photoAssets = []
             selectedAssetID = nil
+            selectedAssetIDs = []
+            selectionAnchorAssetID = nil
             tags = [:]
             ratings = [:]
+            tagUndoStack = []
+            tagRedoStack = []
             return
         }
 
@@ -668,6 +779,8 @@ final class BrowserViewModel: ObservableObject {
                 self.photoAssets = assets
                 self.tags = loadedTags
                 self.ratings = loadedRatings
+                self.tagUndoStack = []
+                self.tagRedoStack = []
                 self.ensureSelectedAssetVisible(defaultToFirst: true)
                 self.isLoadingAssets = false
                 self.syncQueueWithGreenTags()
@@ -761,6 +874,7 @@ final class BrowserViewModel: ObservableObject {
     }
 
     private static func persistExportQueue(_ queue: [ExportQueueItem]) {
+        guard !isRunningTests else { return }
         let encoder = JSONEncoder()
         guard let data = try? encoder.encode(queue.map { ExportQueueRecord(item: $0) }) else { return }
         let url = exportQueueCacheURL()
@@ -770,11 +884,14 @@ final class BrowserViewModel: ObservableObject {
     }
 
     private static func loadPersistedExportQueue() -> [ExportQueueItem] {
+        guard !isRunningTests else { return [] }
         let url = exportQueueCacheURL()
         guard let data = try? Data(contentsOf: url) else { return [] }
         let decoder = JSONDecoder()
         guard let records = try? decoder.decode([ExportQueueRecord].self, from: data) else { return [] }
-        return records.map(\.asQueueItem)
+        return records
+            .map(\.asQueueItem)
+            .filter { !isTestFixtureAssetPath($0.asset.url.path) }
     }
 
     private static func exportQueueCacheURL() -> URL {
@@ -783,6 +900,14 @@ final class BrowserViewModel: ObservableObject {
         return appSupport
             .appending(path: "Darkroom", directoryHint: .isDirectory)
             .appending(path: exportQueueCacheFilename, directoryHint: .notDirectory)
+    }
+
+    private static var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+
+    private static func isTestFixtureAssetPath(_ path: String) -> Bool {
+        path.contains(uiTestFixturePathMarker)
     }
 
     private func loadRecentDestinations(for presetID: ExportPreset.ID?) -> [String] {
@@ -873,19 +998,53 @@ final class BrowserViewModel: ObservableObject {
         defaults.set(true, forKey: Self.starterPresetRestoreOnceDefaultsKey)
     }
 
-    private func setSelectedTag(_ tag: PhotoTag) {
-        guard let selectedAssetID,
-              let selectedAsset = photoAssets.first(where: { $0.id == selectedAssetID }) else {
-            return
+    private func applyTagChange(_ tag: PhotoTag?, to assetIDs: [PhotoAsset.ID], recordHistory: Bool = true) {
+        let uniqueIDs = Array(Set(assetIDs))
+        guard !uniqueIDs.isEmpty else { return }
+
+        var previousTags: [PhotoAsset.ID: PhotoTag] = [:]
+        var changedIDs: [PhotoAsset.ID] = []
+        for assetID in uniqueIDs {
+            let previous = tags[assetID]
+            if previous != tag {
+                if let previous {
+                    previousTags[assetID] = previous
+                }
+                changedIDs.append(assetID)
+            }
         }
-        tags[selectedAssetID] = tag
-        applyFinderTag(tag, to: selectedAssetID)
-        if tag == .keep {
-            _ = ensureQueuedForExport(selectedAsset)
-        } else {
-            removePendingQueueEntry(for: selectedAssetID)
+        guard !changedIDs.isEmpty else { return }
+
+        for assetID in changedIDs {
+            applyTag(tag, to: assetID)
         }
         ensureSelectedAssetVisible()
+
+        if recordHistory {
+            let command = TagEditCommand(assetIDs: changedIDs, previousTags: previousTags, updatedTag: tag)
+            tagUndoStack.append(command)
+            if tagUndoStack.count > maxTagHistory {
+                tagUndoStack.removeFirst(tagUndoStack.count - maxTagHistory)
+            }
+            tagRedoStack = []
+        }
+    }
+
+    private func applyTag(_ tag: PhotoTag?, to assetID: PhotoAsset.ID) {
+        guard photoAssets.contains(where: { $0.id == assetID }) else { return }
+        if let tag {
+            tags[assetID] = tag
+            applyFinderTag(tag, to: assetID)
+            if tag == .keep, let asset = photoAssets.first(where: { $0.id == assetID }) {
+                _ = ensureQueuedForExport(asset)
+            } else {
+                removePendingQueueEntry(for: assetID)
+            }
+        } else {
+            tags[assetID] = nil
+            clearFinderColorTags(for: assetID)
+            removePendingQueueEntry(for: assetID)
+        }
     }
 
     private func applyFinderTag(_ tag: PhotoTag, to assetID: PhotoAsset.ID) {
@@ -924,34 +1083,55 @@ final class BrowserViewModel: ObservableObject {
         let visible = visiblePhotoAssets
         guard !visible.isEmpty else {
             selectedAssetID = nil
+            selectedAssetIDs = []
+            selectionAnchorAssetID = nil
             return
         }
 
         guard let selectedAssetID,
               let currentIndex = visible.firstIndex(where: { $0.id == selectedAssetID }) else {
-            self.selectedAssetID = visible.first?.id
+            if let firstID = visible.first?.id {
+                selectSingleAsset(firstID)
+            }
             return
         }
 
         let targetIndex = max(0, min(visible.count - 1, currentIndex + offset))
-        self.selectedAssetID = visible[targetIndex].id
+        selectSingleAsset(visible[targetIndex].id)
     }
 
     private func ensureSelectedAssetVisible(defaultToFirst: Bool = false) {
         let visible = visiblePhotoAssets
         guard !visible.isEmpty else {
             selectedAssetID = nil
+            selectedAssetIDs = []
+            selectionAnchorAssetID = nil
             return
         }
 
-        if let selectedAssetID, visible.contains(where: { $0.id == selectedAssetID }) {
+        let visibleIDs = Set(visible.map(\.id))
+        selectedAssetIDs = selectedAssetIDs.intersection(visibleIDs)
+        if selectedAssetIDs.isEmpty, let selectedAssetID, visibleIDs.contains(selectedAssetID) {
+            selectedAssetIDs = [selectedAssetID]
+        }
+
+        if let selectedAssetID, visibleIDs.contains(selectedAssetID) {
+            selectedAssetIDs.insert(selectedAssetID)
             return
         }
 
         if defaultToFirst || selectedAssetID == nil {
-            selectedAssetID = visible.first?.id
+            if let firstID = visible.first?.id {
+                selectedAssetID = firstID
+                selectedAssetIDs = [firstID]
+                selectionAnchorAssetID = firstID
+            }
         } else {
-            selectedAssetID = visible.first?.id
+            if let firstID = visible.first?.id {
+                selectedAssetID = firstID
+                selectedAssetIDs = [firstID]
+                selectionAnchorAssetID = firstID
+            }
         }
     }
 
@@ -960,6 +1140,23 @@ final class BrowserViewModel: ObservableObject {
         let current = ratings[selectedAssetID] ?? 0
         let next = current >= 5 ? 0 : current + 1
         setRating(next, for: selectedAssetID)
+    }
+
+    private func targetAssetIDsForTagging() -> [PhotoAsset.ID] {
+        if !selectedAssetIDs.isEmpty {
+            let selected = selectedAssetIDs
+            return visiblePhotoAssets.map(\.id).filter { selected.contains($0) }
+        }
+        if let selectedAssetID {
+            return [selectedAssetID]
+        }
+        return []
+    }
+
+    private func selectSingleAsset(_ assetID: PhotoAsset.ID) {
+        selectedAssetID = assetID
+        selectedAssetIDs = [assetID]
+        selectionAnchorAssetID = assetID
     }
 
     private func setRating(_ value: Int, for assetID: PhotoAsset.ID) {

@@ -122,7 +122,7 @@ struct ExportDestinationOptions: Codable, Hashable {
     static let `default` = ExportDestinationOptions(
         basePath: "",
         subfolderTemplate: "{date}-{shoot}",
-        shootName: "Session"
+        shootName: ""
     )
 }
 

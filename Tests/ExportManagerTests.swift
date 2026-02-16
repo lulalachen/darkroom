@@ -1,5 +1,7 @@
 import AppKit
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 import XCTest
 @testable import darkroom
 
@@ -129,6 +131,102 @@ final class ExportManagerTests: XCTestCase {
         XCTAssertFalse(messages.isEmpty)
     }
 
+    func testRunQueuePreservesExifMetadataByDefault() async throws {
+        let sandbox = try makeSandbox(name: "export-queue-metadata-preserve")
+        let sourceRoot = sandbox.appending(path: "source", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+
+        let file = sourceRoot.appending(path: "photo.jpg", directoryHint: .notDirectory)
+        try makeJPEGWithMetadata(
+            width: 1800,
+            height: 1200,
+            lensModel: "XF35mmF1.4 R",
+            dateTimeOriginal: "2026:02:16 09:10:11"
+        ).write(to: file)
+
+        let item = ExportQueueItem(
+            id: UUID(),
+            asset: asset(file),
+            state: .queued,
+            destinationPath: nil,
+            errorMessage: nil,
+            warningMessage: nil,
+            startedAt: nil,
+            completedAt: nil,
+            bytesWritten: nil
+        )
+        let destination = ExportDestinationOptions(
+            basePath: sandbox.appending(path: "exports", directoryHint: .isDirectory).path,
+            subfolderTemplate: "delivery",
+            shootName: "meta"
+        )
+        let manager = ExportManager()
+
+        _ = try await manager.runQueue(
+            items: [item],
+            preset: ExportPreset(name: "Meta", fileFormat: .jpeg, longEdgePixels: 0, quality: 0.9),
+            destination: destination
+        )
+
+        let outputDir = sandbox
+            .appending(path: "exports", directoryHint: .isDirectory)
+            .appending(path: "delivery", directoryHint: .isDirectory)
+        let exported = try contentsRecursively(at: outputDir)
+        XCTAssertEqual(exported.count, 1)
+
+        let exif = try exifMetadata(for: exported[0])
+        XCTAssertEqual(exif[kCGImagePropertyExifLensModel as String] as? String, "XF35mmF1.4 R")
+        XCTAssertEqual(exif[kCGImagePropertyExifDateTimeOriginal as String] as? String, "2026:02:16 09:10:11")
+    }
+
+    func testRunQueueStripsExifMetadataWhenRequested() async throws {
+        let sandbox = try makeSandbox(name: "export-queue-metadata-strip")
+        let sourceRoot = sandbox.appending(path: "source", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+
+        let file = sourceRoot.appending(path: "photo.jpg", directoryHint: .notDirectory)
+        try makeJPEGWithMetadata(
+            width: 1800,
+            height: 1200,
+            lensModel: "XF23mmF2 R WR",
+            dateTimeOriginal: "2026:02:16 10:11:12"
+        ).write(to: file)
+
+        let item = ExportQueueItem(
+            id: UUID(),
+            asset: asset(file),
+            state: .queued,
+            destinationPath: nil,
+            errorMessage: nil,
+            warningMessage: nil,
+            startedAt: nil,
+            completedAt: nil,
+            bytesWritten: nil
+        )
+        let destination = ExportDestinationOptions(
+            basePath: sandbox.appending(path: "exports", directoryHint: .isDirectory).path,
+            subfolderTemplate: "delivery",
+            shootName: "meta"
+        )
+        let manager = ExportManager()
+
+        _ = try await manager.runQueue(
+            items: [item],
+            preset: ExportPreset(name: "Meta Stripped", fileFormat: .jpeg, longEdgePixels: 0, quality: 0.9, stripMetadata: true),
+            destination: destination
+        )
+
+        let outputDir = sandbox
+            .appending(path: "exports", directoryHint: .isDirectory)
+            .appending(path: "delivery", directoryHint: .isDirectory)
+        let exported = try contentsRecursively(at: outputDir)
+        XCTAssertEqual(exported.count, 1)
+
+        let exif = try exifMetadata(for: exported[0])
+        XCTAssertNil(exif[kCGImagePropertyExifLensModel as String])
+        XCTAssertNil(exif[kCGImagePropertyExifDateTimeOriginal as String])
+    }
+
     private func asset(_ url: URL) -> PhotoAsset {
         PhotoAsset(
             url: url,
@@ -172,6 +270,42 @@ final class ExportManagerTests: XCTestCase {
             throw NSError(domain: "ExportManagerTests", code: 1)
         }
         return jpeg
+    }
+
+    private func makeJPEGWithMetadata(width: Int, height: Int, lensModel: String, dateTimeOriginal: String) throws -> Data {
+        let image = NSImage(size: NSSize(width: width, height: height))
+        image.lockFocus()
+        NSColor.darkGray.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: width, height: height)).fill()
+        image.unlockFocus()
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            throw NSError(domain: "ExportManagerTests", code: 2)
+        }
+
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else {
+            throw NSError(domain: "ExportManagerTests", code: 3)
+        }
+        let exif: [CFString: Any] = [
+            kCGImagePropertyExifLensModel: lensModel,
+            kCGImagePropertyExifDateTimeOriginal: dateTimeOriginal
+        ]
+        let properties: [CFString: Any] = [
+            kCGImagePropertyExifDictionary: exif
+        ]
+        CGImageDestinationAddImage(destination, cgImage, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            throw NSError(domain: "ExportManagerTests", code: 4)
+        }
+        return data as Data
+    }
+
+    private func exifMetadata(for url: URL) throws -> [String: Any] {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] else {
+            throw NSError(domain: "ExportManagerTests", code: 5)
+        }
+        return (properties[kCGImagePropertyExifDictionary as String] as? [String: Any]) ?? [:]
     }
 }
 

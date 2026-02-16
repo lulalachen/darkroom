@@ -1,5 +1,7 @@
 import AppKit
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 actor ExportManager {
     private let fileManager = FileManager.default
@@ -180,48 +182,47 @@ actor ExportManager {
         )
         let watermarked = preset.watermarkEnabled ? applyWatermark(rendered, text: preset.watermarkText) : rendered
 
-        let encoded = try encodeImage(watermarked, preset: preset)
+        let encoded = try encodeImage(watermarked, preset: preset, sourceURL: asset.url)
         try encoded.data.write(to: outputURL, options: [.atomic])
         return ExportRenderResult(url: outputURL, bytesWritten: Int64(encoded.data.count), warningMessage: encoded.warningMessage)
     }
 
-    private func encodeImage(_ image: NSImage, preset: ExportPreset) throws -> (data: Data, warningMessage: String?) {
+    private func encodeImage(_ image: NSImage, preset: ExportPreset, sourceURL: URL) throws -> (data: Data, warningMessage: String?) {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             throw ExportFailure(message: "Could not create bitmap for export.")
         }
-        let bitmap = NSBitmapImageRep(cgImage: cgImage)
 
-        let fileType: NSBitmapImageRep.FileType
+        let destinationUTI: CFString
         let canHonorTargetSize: Bool
         var warningMessage: String?
         switch preset.fileFormat {
         case .jpeg:
-            fileType = .jpeg
+            destinationUTI = UTType.jpeg.identifier as CFString
             canHonorTargetSize = true
         case .heif:
-            fileType = .jpeg
+            destinationUTI = UTType.jpeg.identifier as CFString
             canHonorTargetSize = true
             warningMessage = "HEIF encoding unavailable in current renderer; exported JPEG instead."
         case .tiff:
-            fileType = .tiff
+            destinationUTI = UTType.tiff.identifier as CFString
             canHonorTargetSize = false
         case .original:
             throw ExportFailure(message: "Unsupported original encode path.")
         }
+
+        let metadata = preparedMetadata(sourceURL: sourceURL, outputImage: cgImage, stripMetadata: preset.stripMetadata)
 
         let targetBytes = preset.maxFileSizeKB > 0 ? preset.maxFileSizeKB * 1024 : 0
         if targetBytes > 0, canHonorTargetSize {
             var quality = max(0.35, min(1.0, preset.quality))
             var best: Data?
             while quality >= 0.35 {
-                guard let encoded = bitmap.representation(
-                    using: fileType,
-                    properties: [
-                        .compressionFactor: quality
-                    ]
-                ) else {
-                    throw ExportFailure(message: "Failed to encode image data.")
-                }
+                let encoded = try encodeData(
+                    cgImage: cgImage,
+                    destinationUTI: destinationUTI,
+                    compressionQuality: quality,
+                    metadata: metadata
+                )
                 best = encoded
                 if encoded.count <= targetBytes {
                     return (encoded, warningMessage)
@@ -238,16 +239,55 @@ actor ExportManager {
             return (best, warning)
         }
 
-        let properties: [NSBitmapImageRep.PropertyKey: Any]
-        if fileType == .jpeg {
-            properties = [.compressionFactor: max(0.35, min(1.0, preset.quality))]
-        } else {
-            properties = [:]
-        }
-        guard let data = bitmap.representation(using: fileType, properties: properties) else {
+        let compressionQuality: Double? = destinationUTI == UTType.jpeg.identifier as CFString
+            ? max(0.35, min(1.0, preset.quality))
+            : nil
+        let data = try encodeData(
+            cgImage: cgImage,
+            destinationUTI: destinationUTI,
+            compressionQuality: compressionQuality,
+            metadata: metadata
+        )
+        return (data, warningMessage)
+    }
+
+    private func encodeData(
+        cgImage: CGImage,
+        destinationUTI: CFString,
+        compressionQuality: Double?,
+        metadata: [CFString: Any]?
+    ) throws -> Data {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, destinationUTI, 1, nil) else {
             throw ExportFailure(message: "Failed to encode image data.")
         }
-        return (data, warningMessage)
+
+        var properties: [CFString: Any] = metadata ?? [:]
+        if let compressionQuality,
+           destinationUTI == UTType.jpeg.identifier as CFString {
+            properties[kCGImageDestinationLossyCompressionQuality] = compressionQuality
+        }
+
+        CGImageDestinationAddImage(destination, cgImage, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            throw ExportFailure(message: "Failed to encode image data.")
+        }
+        return data as Data
+    }
+
+    private func preparedMetadata(sourceURL: URL, outputImage: CGImage, stripMetadata: Bool) -> [CFString: Any]? {
+        guard !stripMetadata else { return nil }
+        guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+              let sourceMetadata = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            return nil
+        }
+
+        var metadata = sourceMetadata
+        // Keep original metadata, but keep dimensions/orientation aligned with rendered pixels.
+        metadata[kCGImagePropertyPixelWidth] = outputImage.width
+        metadata[kCGImagePropertyPixelHeight] = outputImage.height
+        metadata[kCGImagePropertyOrientation] = 1
+        return metadata
     }
 
     private func resizedImageIfNeeded(_ image: NSImage, longEdge: Int) -> NSImage {
@@ -305,7 +345,11 @@ actor ExportManager {
         let folderTemplate = template.isEmpty ? "{date}-{shoot}" : template
         let dateString = Self.dateFormatter.string(from: Date())
         let sequenceString = String(format: "%04d", sequenceIndex)
-        let shoot = sanitizedPathComponent(destination.shootName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Session" : destination.shootName)
+        let shootRaw = destination.shootName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !shootRaw.isEmpty else {
+            throw ExportFailure(message: "Folder name is required.")
+        }
+        let shoot = sanitizedPathComponent(shootRaw)
 
         var resolved = folderTemplate
         resolved = resolved.replacingOccurrences(of: "{date}", with: dateString)
