@@ -78,8 +78,8 @@ struct ExportPreset: Identifiable, Codable, Hashable {
     }
 
     static let starterPresets: [ExportPreset] = [
+        ExportPreset(name: "JPEG High", fileFormat: .jpeg, longEdgePixels: 3_096, quality: 1.0, maxFileSizeKB: 10_240),
         ExportPreset(name: "Social 2048", fileFormat: .jpeg, longEdgePixels: 2_048, quality: 0.82, maxFileSizeKB: 700, stripMetadata: true),
-        ExportPreset(name: "Client High", fileFormat: .jpeg, longEdgePixels: 4_000, quality: 0.92, maxFileSizeKB: 4_500),
         ExportPreset(name: "Archive TIFF", fileFormat: .tiff, longEdgePixels: 0, quality: 1.0, colorSpace: .displayP3)
     ]
 }
@@ -121,7 +121,7 @@ struct ExportDestinationOptions: Codable, Hashable {
 
     static let `default` = ExportDestinationOptions(
         basePath: "",
-        subfolderTemplate: "{date}-{shoot}",
+        subfolderTemplate: "{shoot}",
         shootName: ""
     )
 }

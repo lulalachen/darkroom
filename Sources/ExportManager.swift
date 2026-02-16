@@ -342,7 +342,7 @@ actor ExportManager {
         }
 
         let template = destination.subfolderTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
-        let folderTemplate = template.isEmpty ? "{date}-{shoot}" : template
+        let folderTemplate = template.isEmpty ? "{shoot}" : template
         let dateString = Self.dateFormatter.string(from: Date())
         let sequenceString = String(format: "%04d", sequenceIndex)
         let shootRaw = destination.shootName.trimmingCharacters(in: .whitespacesAndNewlines)

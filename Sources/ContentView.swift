@@ -183,6 +183,8 @@ struct BrowserDetailView: View {
     @State private var showsAdjustmentsPanel = false
     @State private var showsShortcutHelp = false
     @State private var showsToolbarShootNameHint = false
+    @State private var thumbnailDisplayMode: PhotoGridPane.ThumbnailDisplayMode = .fit
+    @State private var thumbnailColumns: Double = 4
     @FocusState private var toolbarShootNameFocused: Bool
 
     var body: some View {
@@ -198,7 +200,11 @@ struct BrowserDetailView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 GrayHSplitView {
-                    PhotoGridPane(viewModel: viewModel)
+                    PhotoGridPane(
+                        viewModel: viewModel,
+                        thumbnailDisplayMode: $thumbnailDisplayMode,
+                        thumbnailColumns: $thumbnailColumns
+                    )
                         .frame(minWidth: 260)
                 } trailing: {
                     PreviewPane(
@@ -338,6 +344,41 @@ struct BrowserDetailView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if let banner = viewModel.exportCompletionBanner {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Export Complete")
+                            .font(.subheadline.weight(.semibold))
+                        Text("\(banner.exportedCount) photo(s) exported")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Button("Open") {
+                        viewModel.openExportCompletionFolder()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Button {
+                        viewModel.dismissExportCompletionBanner()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(12)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+                .padding(.trailing, 14)
+                .padding(.bottom, 36)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
@@ -367,6 +408,10 @@ struct BrowserDetailView: View {
             viewModel.selectDownAsset()
             return true
         default:
+            if let key = event.charactersIgnoringModifiers?.lowercased(), key == "p" {
+                togglePreviewMode()
+                return true
+            }
             if viewModel.handleTagHotkey(event.charactersIgnoringModifiers) {
                 return true
             }
@@ -425,6 +470,15 @@ struct BrowserDetailView: View {
             }
             viewModel.selectAllVisibleAssets()
             return true
+        case "=", "+":
+            increasePreviewSize()
+            return true
+        case "-", "_":
+            decreasePreviewSize()
+            return true
+        case "0":
+            resetPreviewSize()
+            return true
         case "z":
             if event.modifierFlags.contains(.shift) {
                 guard viewModel.canRedoTagEdit else { return false }
@@ -444,7 +498,7 @@ struct BrowserDetailView: View {
             showToolbarShootNamePrompt()
             return
         }
-        viewModel.enqueueSelectedForExport()
+        viewModel.enqueueGreenTaggedForExport()
         viewModel.startExportQueue()
     }
 
@@ -484,6 +538,22 @@ struct BrowserDetailView: View {
         guard let keyMonitor else { return }
         NSEvent.removeMonitor(keyMonitor)
         self.keyMonitor = nil
+    }
+
+    private func togglePreviewMode() {
+        thumbnailDisplayMode = (thumbnailDisplayMode == .fit) ? .aspectRatio : .fit
+    }
+
+    private func increasePreviewSize() {
+        thumbnailColumns = max(1, thumbnailColumns.rounded() - 1)
+    }
+
+    private func decreasePreviewSize() {
+        thumbnailColumns = thumbnailColumns.rounded() + 1
+    }
+
+    private func resetPreviewSize() {
+        thumbnailColumns = 4
     }
 }
 
@@ -549,9 +619,12 @@ struct ShortcutHelpOverlay: View {
                 shortcutLine("Cmd+3", "Filter: Rejected")
                 shortcutLine("Cmd+4", "Filter: Untagged")
                 shortcutLine("Cmd+A", "Select all visible photos")
+                shortcutLine("Cmd++ / Cmd+-", "Increase / decrease preview size")
+                shortcutLine("Cmd+0", "Reset preview size")
                 shortcutLine("Cmd+E", "Toggle adjustments panel")
                 shortcutLine("Cmd+S", "Show sidebar")
                 shortcutLine("Cmd+H", "Toggle this help")
+                shortcutLine("P", "Toggle preview mode")
                 shortcutLine("Cmd+Z", "Undo tag edit")
                 shortcutLine("Cmd+Shift+Z", "Redo tag edit")
                 shortcutLine("Arrow keys", "Move selection")
@@ -637,8 +710,8 @@ struct PhotoGridPane: View {
     private let spacing: CGFloat = 10
     private let horizontalPadding: CGFloat = 24
     private let sectionSpacing: CGFloat = 12
-    @State private var thumbnailDisplayMode: ThumbnailDisplayMode = .fit
-    @State private var thumbnailSize: Double = 160
+    @Binding var thumbnailDisplayMode: ThumbnailDisplayMode
+    @Binding var thumbnailColumns: Double
     @State private var lastGridWidth: CGFloat = 0
 
     var body: some View {
@@ -711,6 +784,7 @@ struct PhotoGridPane: View {
                     }
                     .onAppear {
                         lastGridWidth = geometry.size.width
+                        clampColumnsToRange()
                         updateGridConfig(for: geometry.size.width)
                         scrollToSelection(with: proxy)
                     }
@@ -719,6 +793,7 @@ struct PhotoGridPane: View {
                     }
                     .onChange(of: geometry.size.width) { newWidth in
                         lastGridWidth = newWidth
+                        clampColumnsToRange()
                         updateGridConfig(for: newWidth)
                     }
                 }
@@ -736,12 +811,14 @@ struct PhotoGridPane: View {
                 Text("Size")
                     .font(.body.weight(.bold))
 
-                Slider(value: $thumbnailSize, in: 140...220)
+                Slider(value: sizeSliderBinding, in: columnSliderRange)
                 .frame(minWidth: 140, maxWidth: 220)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .onChange(of: thumbnailSize) { _ in
+            .onChange(of: thumbnailColumns) { _ in
+                // Keep the control discrete by row count while preserving a smooth slider track.
+                thumbnailColumns = thumbnailColumns.rounded()
                 if lastGridWidth > 0 {
                     updateGridConfig(for: lastGridWidth)
                 }
@@ -750,8 +827,22 @@ struct PhotoGridPane: View {
     }
 
     private func columns(for width: CGFloat) -> [GridItem] {
-        let minimumCellWidth = max(110, min(CGFloat(thumbnailSize), width - horizontalPadding))
-        return [GridItem(.adaptive(minimum: minimumCellWidth), spacing: spacing)]
+        let count = currentColumnCount(for: width)
+        return Array(repeating: GridItem(.flexible(minimum: 80), spacing: spacing), count: count)
+    }
+
+    private var columnSliderRange: ClosedRange<Double> {
+        let maxColumns = maxColumnsForWidth(lastGridWidth)
+        return 1...Double(maxColumns)
+    }
+
+    private func clampColumnsToRange() {
+        let range = columnSliderRange
+        if thumbnailColumns < range.lowerBound {
+            thumbnailColumns = range.lowerBound
+        } else if thumbnailColumns > range.upperBound {
+            thumbnailColumns = range.upperBound
+        }
     }
 
     private func scrollToSelection(with proxy: ScrollViewProxy) {
@@ -762,10 +853,34 @@ struct PhotoGridPane: View {
     }
 
     private func updateGridConfig(for width: CGFloat) {
-        let minimumCellWidth = max(110, min(CGFloat(thumbnailSize), width - horizontalPadding))
+        viewModel.setGridColumnCount(currentColumnCount(for: width))
+    }
+
+    private func currentColumnCount(for width: CGFloat) -> Int {
+        let maxColumns = maxColumnsForWidth(width)
+        return min(max(1, Int(thumbnailColumns.rounded())), maxColumns)
+    }
+
+    private func maxColumnsForWidth(_ width: CGFloat) -> Int {
+        let minCellWidth: CGFloat = 110
         let availableWidth = max(0, width - horizontalPadding)
-        let count = Int((availableWidth + spacing) / (minimumCellWidth + spacing))
-        viewModel.setGridColumnCount(max(1, count))
+        let count = Int((availableWidth + spacing) / (minCellWidth + spacing))
+        return max(1, count)
+    }
+
+    private var sizeSliderBinding: Binding<Double> {
+        Binding(
+            get: {
+                invertedSliderValue(for: thumbnailColumns, in: columnSliderRange)
+            },
+            set: { newValue in
+                thumbnailColumns = invertedSliderValue(for: newValue, in: columnSliderRange)
+            }
+        )
+    }
+
+    private func invertedSliderValue(for value: Double, in range: ClosedRange<Double>) -> Double {
+        range.upperBound - (value - range.lowerBound)
     }
 
     private var groupedAssets: [PhotoSection] {

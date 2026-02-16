@@ -67,6 +67,7 @@ final class BrowserViewModel: ObservableObject {
     @Published private(set) var shortcutProfile: KeyboardShortcutProfile = .classicZXC
     @Published private(set) var isExporting: Bool = false
     @Published private(set) var exportStatus: String?
+    @Published private(set) var exportCompletionBanner: ExportCompletionBanner?
     @Published private(set) var exportQueue: [ExportQueueItem] = [] {
         didSet { Self.persistExportQueue(exportQueue) }
     }
@@ -165,7 +166,7 @@ final class BrowserViewModel: ObservableObject {
 
         let exportPath = UserDefaults.standard.string(forKey: Self.lastExportPathDefaultsKey) ?? ""
         self.exportDestination.basePath = exportPath
-        self.exportDestination.subfolderTemplate = UserDefaults.standard.string(forKey: Self.exportSubfolderTemplateDefaultsKey) ?? "{date}-{shoot}"
+        self.exportDestination.subfolderTemplate = Self.loadPersistedSubfolderTemplate()
         self.exportDestination.shootName = UserDefaults.standard.string(forKey: Self.exportShootNameDefaultsKey) ?? ""
         self.exportPresets = Self.loadPersistedExportPresets() ?? ExportPreset.starterPresets
         self.restoreMissingStarterPresetsOnceIfNeeded()
@@ -457,16 +458,20 @@ final class BrowserViewModel: ObservableObject {
             exportStatus = "No export preset selected."
             return
         }
-        guard exportQueue.contains(where: { !$0.state.isTerminal }) else {
-            exportStatus = "No pending exports in queue."
+        let currentSourceIDs = Set(photoAssets.map(\.id))
+        let queueSnapshot = exportQueue.filter { item in
+            !item.state.isTerminal && currentSourceIDs.contains(item.asset.id)
+        }
+        guard !queueSnapshot.isEmpty else {
+            exportStatus = "No pending exports for current source."
             return
         }
 
         isExporting = true
+        exportCompletionBanner = nil
         exportStatus = "Export queue running..."
         rememberRecentDestination(exportDestination.basePath, for: preset.id)
         requestNotificationPermissionIfNeeded()
-        let queueSnapshot = exportQueue
         let destination = exportDestination
 
         Task {
@@ -483,6 +488,12 @@ final class BrowserViewModel: ObservableObject {
                 await MainActor.run {
                     self.isExporting = false
                     self.exportStatus = "Exported \(summary.exportedCount), failed \(summary.failedCount), cancelled \(summary.cancelledCount)."
+                    if let folderPath = self.latestCompletedExportFolderPath(), summary.exportedCount > 0 {
+                        self.exportCompletionBanner = ExportCompletionBanner(
+                            folderPath: folderPath,
+                            exportedCount: summary.exportedCount
+                        )
+                    }
                     self.postExportCompletionNotification(summary: summary)
                 }
                 await StructuredLogger.shared.log(
@@ -540,6 +551,15 @@ final class BrowserViewModel: ObservableObject {
     func revealExportedItem(_ item: ExportQueueItem) {
         guard let destinationPath = item.destinationPath else { return }
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: destinationPath)])
+    }
+
+    func openExportCompletionFolder() {
+        guard let folderPath = exportCompletionBanner?.folderPath else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: folderPath, isDirectory: true))
+    }
+
+    func dismissExportCompletionBanner() {
+        exportCompletionBanner = nil
     }
 
     func useRecentExportDestination(_ path: String) {
@@ -857,6 +877,16 @@ final class BrowserViewModel: ObservableObject {
         if snapshot.state.isTerminal {
             exportQueue[index].completedAt = Date()
         }
+    }
+
+    private func latestCompletedExportFolderPath() -> String? {
+        let latestDone = exportQueue
+            .filter { $0.state == .done && $0.destinationPath != nil }
+            .sorted { ($0.completedAt ?? .distantPast) < ($1.completedAt ?? .distantPast) }
+            .last
+
+        guard let destinationPath = latestDone?.destinationPath else { return nil }
+        return URL(fileURLWithPath: destinationPath).deletingLastPathComponent().path
     }
 
     private func persistExportPresets() {
@@ -1196,6 +1226,24 @@ final class BrowserViewModel: ObservableObject {
     }
 }
 
+private extension BrowserViewModel {
+    static func loadPersistedSubfolderTemplate() -> String {
+        let defaults = UserDefaults.standard
+        let key = exportSubfolderTemplateDefaultsKey
+
+        guard let stored = defaults.string(forKey: key) else {
+            return "{shoot}"
+        }
+
+        let trimmed = stored.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "{date}-{shoot}" {
+            defaults.set("{shoot}", forKey: key)
+            return "{shoot}"
+        }
+        return stored
+    }
+}
+
 private struct ExportQueueRecord: Codable {
     let id: UUID
     let sourcePath: String
@@ -1243,6 +1291,12 @@ private struct ExportQueueRecord: Codable {
             bytesWritten: bytesWritten
         )
     }
+}
+
+struct ExportCompletionBanner: Identifiable, Equatable {
+    let id = UUID()
+    let folderPath: String
+    let exportedCount: Int
 }
 
 extension Notification.Name {
