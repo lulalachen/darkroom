@@ -22,6 +22,51 @@ Goal: build a macOS app that accelerates a photo-editing workflow: ultra-fast SD
 - **Session Management:** log each import session (device id, timestamp, asset count) to prevent duplicates and show “Already Imported” badges.
 - **User Feedback:** global activity center summarizing running imports, errors (disk full, permission), and completion notifications linking to the new collection.
 
+### Next Milestone Execution Plan (Current)
+Focus this cycle on a shippable M2 slice: durable import records + duplicate prevention + resilient import UX.
+
+**Why this next:** M1 browsing is usable, and the app already supports basic copy-import from Green-tagged photos. The biggest product risk now is losing provenance and re-importing duplicates without reliable session tracking.
+
+**Scope (in):**
+1. Library package bootstrap and stable folder layout (`Originals/`, `Previews/`, `Manifests/`).
+2. Import manifest persistence (SQLite preferred) with `assets` and `import_sessions` tables.
+3. Content hashing during import (`SHA256`) and duplicate detection before copy.
+4. Import status model with explicit states (`queued`, `copying`, `hashing`, `done`, `failed`) surfaced in UI.
+5. Resume-safe imports by recording partial progress and skipping completed files on retry.
+
+**Scope (out):**
+1. Adjustment stack and edit workspace.
+2. Export presets and delivery queue.
+3. Cloud sync and automation integrations.
+
+**Implementation tasks:**
+1. Add `LibraryManager` to create/validate library structure at startup and expose paths.
+2. Replace ad-hoc `ImportManager` copy loop with a pipeline:
+   - stage import session row,
+   - preflight duplicate check by hash/path fingerprint,
+   - copy to unique destination,
+   - verify copied hash,
+   - commit asset + session links transactionally.
+3. Introduce a lightweight persistence layer (`ImportStore`) and migration versioning.
+4. Extend `BrowserViewModel` with per-asset import progress + final summary counts (`imported`, `skipped-duplicate`, `failed`).
+5. Add failure handling for permission denied, missing source file, out-of-space, and cancelled import.
+6. Add tests for collision naming, duplicate detection, and interrupted import resume.
+
+**Acceptance criteria:**
+1. Re-importing the same files does not create duplicate originals.
+2. Import interruption (app quit/relaunch) can continue without re-copying completed files.
+3. Each import run is queryable as a session with timestamp, source volume, and outcome counts.
+4. UI reports per-run outcomes with actionable errors, not generic failure text.
+5. Automated tests cover at least:
+   - filename collision behavior,
+   - duplicate-skip behavior,
+   - resume behavior after partial completion.
+
+**Exit artifact for this milestone:**
+1. `DarkroomLibrary.darkroom` created automatically and versioned.
+2. Import history view (minimal list) showing last N sessions and counts.
+3. Verified import reliability on a sample card with mixed JPEG/RAW files.
+
 ## Milestone M3 – Editing Workspace & Adjustment Stack
 - **Adjustment Engine:** implement non-destructive stack describing operations (exposure, contrast, highlights/shadows, white balance temp/tint, vibrance, crop/rotate, straighten). Store parameter blobs per asset so originals stay untouched. Back adjustments with Core Image filter graph for GPU-accelerated previews.
 - **State Management:** use Combine to propagate adjustment changes to preview canvases with throttled rendering (e.g., debounce 16 ms). Persist unsaved adjustments automatically within the library database and mark dirty assets for export later.
@@ -53,4 +98,4 @@ Goal: build a macOS app that accelerates a photo-editing workflow: ultra-fast SD
 - Plug-in hooks for extra adjustments.
 - Automation/shortcuts integration.
 
-_Last updated: February 15, 2026._
+_Last updated: February 16, 2026._

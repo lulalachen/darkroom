@@ -9,3 +9,12 @@ This directory stores long-lived planning documents for the project. Each plan s
 4. Leave the `.gitkeep` file in place so the folder remains tracked even if all plans are temporarily removed.
 
 Feel free to expand this structure with subfolders (e.g., `archive/`, `active/`) if planning documents grow over time.
+
+## Build Context
+To build a launchable macOS app bundle while working from this repository, use:
+
+```bash
+./build-app.sh
+```
+
+The script outputs `dist/debug/Darkroom.app` (or `dist/release/Darkroom.app` when called with `release`).
