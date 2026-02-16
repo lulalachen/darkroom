@@ -1,11 +1,22 @@
 # macOS Photo Workflow App Plan
 
 ## Overview
-Goal: build a macOS app that accelerates a photo-editing workflow: ultra-fast SD card browsing, selective import into a managed library, basic adjustments (phase 2), and export to user-chosen destinations with size limits. Focus areas:
+Goal: build a macOS app that accelerates a photo-editing workflow: ultra-fast SD card browsing, non-destructive adjustments, and export to user-chosen destinations with size limits. Focus areas:
 - **Browse:** detect SD card mounts, enumerate media, show instant grid + detail previews.
-- **Import:** stage selections, copy into app-managed library with metadata tracking.
-- **Edit:** non-destructive basic adjustments (exposure, WB, crop) added after import pipeline is stable.
+- **Edit:** non-destructive basic adjustments (exposure, WB, crop) with preset/history support.
 - **Export:** batch export with compression presets, custom target path/folder structure.
+
+## Status
+- **Current milestone:** M5 – Polish, Performance, and Resilience (In Progress)
+- **Last completed milestone:** M4 – Export Workflow & Delivery (Completed February 16, 2026)
+- **M4 completion:** 100% (as of February 16, 2026)
+- **Product pivot:** February 16, 2026 — import/session features deprecated in favor of a single export-first workflow.
+- **Progress cadence:** update this section at each implementation checkpoint.
+
+## Product Direction Update (February 16, 2026)
+- Darkroom is now an export-only workflow product.
+- Green tags are treated as export intent and can be queued/run directly to final destination presets.
+- Import session/history/activity features from M2 are considered deprecated and not part of active roadmap scope.
 
 ## Milestone M1 – Foundation & Fast Browsing
 - **SD Card Detection:** DiskArbitration-based watcher emitting mount/unmount events and mapping each removable disk to a logical device session.
@@ -67,6 +78,14 @@ Focus this cycle on a shippable M2 slice: durable import records + duplicate pre
 2. Import history view (minimal list) showing last N sessions and counts.
 3. Verified import reliability on a sample card with mixed JPEG/RAW files.
 
+### M2 Completion Notes (February 16, 2026)
+1. Implemented persistent import sessions/items/assets via SQLite with schema migrations.
+2. Implemented resumable import processing with explicit item states, duplicate detection, and retry flows.
+3. Implemented staging tray UX, activity/history panels, and “Already Imported” badges.
+4. Implemented export destination flow with `YYYY-MM-DD/<photo-name>` format under chosen path/folder.
+5. Implemented metadata application path (embedded when possible, sidecar fallback).
+6. Added/updated tests for collision handling, duplicate skip, resume, retry, metadata sidecar, and export path behavior.
+
 ## Milestone M3 – Editing Workspace & Adjustment Stack
 - **Adjustment Engine:** implement non-destructive stack describing operations (exposure, contrast, highlights/shadows, white balance temp/tint, vibrance, crop/rotate, straighten). Store parameter blobs per asset so originals stay untouched. Back adjustments with Core Image filter graph for GPU-accelerated previews.
 - **State Management:** use Combine to propagate adjustment changes to preview canvases with throttled rendering (e.g., debounce 16 ms). Persist unsaved adjustments automatically within the library database and mark dirty assets for export later.
@@ -85,6 +104,16 @@ Focus this cycle on a shippable M2 slice: durable import records + duplicate pre
 - **Error Handling:** capture disk-full, permission, and render errors; surface them inline with actionable guidance. Maintain audit log for exports for traceability.
 - **Notifications & Automation Hooks:** provide system notifications when queues finish and expose Apple Shortcuts intents for “Export with preset X to destination Y”.
 
+### M4 Completion Notes (February 16, 2026)
+1. Implemented export preset system with editable options (format, long edge, quality, color space, metadata strip toggle, watermark toggle/text, max target size).
+2. Implemented destination templating with `{date}`, `{shoot}`, `{sequence}` substitutions and per-preset recent destination memory.
+3. Implemented export queue sheet with enqueue/start/cancel/retry/clear controls, per-item status, size, warnings, reveal-in-Finder, and ETA.
+4. Implemented background export worker pool (2 workers) with cancellable run loop, resumable queue cache restored on app relaunch, and auto-resume of pending queue.
+5. Implemented render/write pipeline for JPEG/HEIF/TIFF (plus original-copy mode), downscale by long edge, optional text watermark, and file-size target fallback heuristics.
+6. Implemented export error mapping (disk-full/permission/path) and JSONL audit logging at `~/Library/Logs/Darkroom/export-audit.jsonl`.
+7. Implemented completion notifications and Apple Shortcuts App Intent hook (`ExportWithPresetIntent`) for “preset + destination” triggering.
+8. Added export-focused automated tests for destination/template behavior, collision naming, and target-size warning behavior.
+
 ## Milestone M5 – Polish, Performance, and Resilience
 - **Caching & Offline Mode:** refine preview caches with smart invalidation, support working entirely from library when SD card is absent, and purge cache segments when storage pressure occurs.
 - **Input Efficiency:** add configurable keyboard shortcut sets, multi-select gestures, rating/flag hotkeys, and contextual menus for rapid triage.
@@ -92,6 +121,18 @@ Focus this cycle on a shippable M2 slice: durable import records + duplicate pre
 - **Settings & Preferences:** centralized pane for cache size, default library path, preset management, telemetry opt-in, and SD card auto-eject options.
 - **Quality Assurance:** build automated test suites covering import collision cases, adjustment serialization, and export rendering. Integrate with CI for regression detection.
 - **Accessibility & Localization Prep:** ensure VoiceOver labels and dynamic type scaling; structure copy for future localization.
+
+### M5 Progress Notes (February 16, 2026)
+1. Added centralized Settings UI with controls for thumbnail/full-image cache size, telemetry logging toggle, auto-eject toggle, shortcut profile, and default library path.
+2. Upgraded thumbnail and full-image caches to LRU with runtime-configurable limits and explicit clear operations.
+3. Added memory-pressure handling that purges caches and reports status.
+4. Added offline browsing fallback by exposing Darkroom library originals as a selectable sidebar source.
+5. Added configurable shortcut profiles (`Z/X/C` and `1/2/0`) plus grid context menu actions for faster triage/staging/export queueing.
+6. Added structured JSONL telemetry logging for import/export completion/failure and memory-pressure events (gated by preference).
+7. Added automated cache behavior tests for eviction and clear paths.
+8. Added thumbnail accessibility labels to improve VoiceOver announcements.
+9. Added GitHub Actions CI workflow running `swift build`, `swift test`, and app bundle generation.
+10. Added per-asset star ratings with quick actions (context menu + `R` hotkey cycle) for faster triage.
 
 ## Future Considerations
 - iCloud/remote library sync?

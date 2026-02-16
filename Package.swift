@@ -19,6 +19,7 @@ let package = Package(
             name: "darkroom",
             path: "Sources",
             resources: [
+                .copy("Resources/AppIcon.icon"),
                 .copy("Resources/AppIcon.png")
             ],
             linkerSettings: [

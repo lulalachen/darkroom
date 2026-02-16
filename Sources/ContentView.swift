@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var viewModel: BrowserViewModel
@@ -28,6 +27,11 @@ struct VolumeSidebar: View {
                     ForEach(viewModel.filteredVolumes) { volume in
                         VolumeRow(volume: volume)
                     }
+                }
+            }
+            if let libraryVolume = viewModel.libraryVolume {
+                Section("Library") {
+                    VolumeRow(volume: libraryVolume)
                 }
             }
         }
@@ -58,15 +62,15 @@ struct VolumeRow: View {
             }
         }
         .tag(volume)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(volume.displayName), \(volume.subtitle)")
     }
 }
 
 struct BrowserDetailView: View {
     @ObservedObject var viewModel: BrowserViewModel
     @State private var keyMonitor: Any?
-    @State private var showsImportHistory = false
-    @State private var showsActivityCenter = false
-    @State private var showsExportSetup = false
+    @State private var showsExportQueue = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -88,11 +92,14 @@ struct BrowserDetailView: View {
                 }
             }
 
-            ImportStagingTray(viewModel: viewModel)
+            ExportStatusBar(viewModel: viewModel)
             Divider()
-            ImportStatusBar(viewModel: viewModel)
         }
+        .contentShape(Rectangle())
         .background(Color(NSColor.windowBackgroundColor))
+        .onTapGesture {
+            clearTextInputFocus()
+        }
         .onAppear {
             installKeyMonitor()
         }
@@ -109,42 +116,26 @@ struct BrowserDetailView: View {
                 .pickerStyle(.segmented)
                 .frame(width: 280)
 
-                Button("Green (Z)") {
+                Button("Green") {
                     viewModel.tagSelectedAsKeep()
                 }
 
-                Button("Red (X)") {
+                Button("Red") {
                     viewModel.tagSelectedAsReject()
                 }
 
-                Button("Clear (C)") {
+                Button("Clear") {
                     viewModel.clearSelectedTag()
                 }
 
-                Button {
-                    if viewModel.hasValidExportTarget {
-                        viewModel.importMarkedPhotos()
-                    } else {
-                        showsExportSetup = true
-                    }
-                } label: {
-                    if viewModel.isImporting {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Label("Import Staged (\(viewModel.stagedPhotoAssets.count))", systemImage: "square.and.arrow.down")
-                    }
-                }
-                .disabled(viewModel.stagedPhotoAssets.isEmpty || viewModel.isImporting)
-
-                Button("History") {
-                    viewModel.refreshImportHistory()
-                    showsImportHistory = true
+                Button("Start Export") {
+                    viewModel.startExportQueue()
                 }
 
-                Button("Activity") {
-                    showsActivityCenter = true
+                Button("Export Queue") {
+                    showsExportQueue = true
                 }
+                .accessibilityLabel("Open export queue")
             }
 
             if let volume = viewModel.selectedVolume {
@@ -155,17 +146,8 @@ struct BrowserDetailView: View {
                 }
             }
         }
-        .sheet(isPresented: $showsImportHistory) {
-            ImportHistorySheet(viewModel: viewModel)
-        }
-        .sheet(isPresented: $showsActivityCenter) {
-            ImportActivitySheet(viewModel: viewModel)
-        }
-        .sheet(isPresented: $showsExportSetup) {
-            ExportSetupSheet(viewModel: viewModel) {
-                showsExportSetup = false
-                viewModel.importMarkedPhotos()
-            }
+        .sheet(isPresented: $showsExportQueue) {
+            ExportQueueSheet(viewModel: viewModel)
         }
     }
 
@@ -190,29 +172,11 @@ struct BrowserDetailView: View {
         case 125:
             viewModel.selectDownAsset()
             return true
-        case 6:
-            viewModel.tagSelectedAsKeep()
-            return true
-        case 7:
-            viewModel.tagSelectedAsReject()
-            return true
-        case 8:
-            viewModel.clearSelectedTag()
-            return true
         default:
-            switch event.charactersIgnoringModifiers?.lowercased() {
-            case "z":
-                viewModel.tagSelectedAsKeep()
+            if viewModel.handleTagHotkey(event.charactersIgnoringModifiers) {
                 return true
-            case "x":
-                viewModel.tagSelectedAsReject()
-                return true
-            case "c":
-                viewModel.clearSelectedTag()
-                return true
-            default:
-                return false
             }
+            return false
         }
     }
 
@@ -224,6 +188,11 @@ struct BrowserDetailView: View {
             return textView.isFieldEditor || textView.isEditable
         }
         return responder is NSTextField
+    }
+
+    private func clearTextInputFocus() {
+        guard isTextInputFocused() else { return }
+        NSApp.keyWindow?.makeFirstResponder(nil)
     }
 
     private func installKeyMonitor() {
@@ -291,15 +260,43 @@ struct PhotoGridPane: View {
                                 asset: asset,
                                 isSelected: asset.id == viewModel.selectedAssetID,
                                 tag: viewModel.tag(for: asset),
-                                importState: viewModel.importItemStates[asset.id],
-                                isAlreadyImported: viewModel.alreadyImportedAssetIDs.contains(asset.id)
+                                rating: viewModel.rating(for: asset)
                             )
                             .id(asset.id)
                             .onTapGesture {
                                 viewModel.select(asset)
                             }
-                            .onDrag {
-                                NSItemProvider(object: asset.id as NSString)
+                            .contextMenu {
+                                Button("Tag Green") {
+                                    viewModel.select(asset)
+                                    viewModel.tagSelectedAsKeep()
+                                }
+                                Button("Tag Red") {
+                                    viewModel.select(asset)
+                                    viewModel.tagSelectedAsReject()
+                                }
+                                Button("Clear Tag") {
+                                    viewModel.select(asset)
+                                    viewModel.clearSelectedTag()
+                                }
+                                Divider()
+                                Button("Queue For Export") {
+                                    viewModel.select(asset)
+                                    viewModel.enqueueSelectedForExport()
+                                }
+                                Divider()
+                                Menu("Rating") {
+                                    ForEach(1...5, id: \.self) { rating in
+                                        Button(String(repeating: "★", count: rating)) {
+                                            viewModel.select(asset)
+                                            viewModel.setSelectedRating(rating)
+                                        }
+                                    }
+                                    Button("Clear Rating") {
+                                        viewModel.select(asset)
+                                        viewModel.clearSelectedRating()
+                                    }
+                                }
                             }
                         }
                     }
@@ -341,7 +338,23 @@ struct PhotoGridPane: View {
 
 struct PreviewPane: View {
     @ObservedObject var viewModel: BrowserViewModel
+    @State private var sourceImage: NSImage?
+    @State private var sourcePixelSize: CGSize = .zero
     @State private var previewImage: NSImage?
+    @State private var settings: AdjustmentSettings = .default
+    @State private var presets: [AdjustmentPreset] = AdjustmentPreset.builtIns
+    @State private var selectedPresetID: AdjustmentPreset.ID?
+    @State private var savePresetName = ""
+    @State private var showSavePresetPrompt = false
+    @State private var undoStack: [AdjustmentSettings] = []
+    @State private var redoStack: [AdjustmentSettings] = []
+    @State private var versionBSnapshot: AdjustmentSettings?
+    @State private var showOriginal = false
+    @State private var previewZoom: CGFloat = 1
+    @GestureState private var magnifyScale: CGFloat = 1
+    @GestureState private var gestureRotation: Angle = .zero
+    @State private var renderTask: Task<Void, Never>?
+    @State private var persistTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -355,7 +368,10 @@ struct PreviewPane: View {
                         Image(nsImage: previewImage)
                             .resizable()
                             .scaledToFit()
+                            .scaleEffect(max(1, min(8, previewZoom * magnifyScale)))
+                            .rotationEffect(gestureRotation)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .gesture(previewGesture)
                     } else {
                         ProgressView("Loading preview...")
                     }
@@ -370,20 +386,252 @@ struct PreviewPane: View {
                     TagChip(tag: viewModel.tag(for: asset))
                 }
 
-                Text("Shortcuts: Z = Green, X = Red, C = Clear")
+                HStack(spacing: 8) {
+                    Toggle(showOriginal ? "Original" : "Adjusted", isOn: $showOriginal)
+                        .toggleStyle(.switch)
+                        .onChange(of: showOriginal) { _ in
+                            schedulePreviewRender()
+                        }
+                    Spacer()
+                    Button("Undo") {
+                        undo()
+                    }
+                    .disabled(undoStack.isEmpty)
+
+                    Button("Redo") {
+                        redo()
+                    }
+                    .disabled(redoStack.isEmpty)
+
+                    Button("Reset") {
+                        applySettings(.default)
+                    }
+
+                    Button("Save Version B") {
+                        versionBSnapshot = settings
+                        if let asset = viewModel.selectedAsset {
+                            Task {
+                                await AdjustmentStore.shared.saveBookmark(
+                                    name: "Version B",
+                                    settings: settings,
+                                    for: asset.url.path
+                                )
+                            }
+                        }
+                    }
+
+                    Button("Apply Version B") {
+                        if let versionBSnapshot {
+                            applySettings(versionBSnapshot)
+                        }
+                    }
+                    .disabled(versionBSnapshot == nil)
+                }
+
+                HStack(spacing: 8) {
+                    Picker("Preset", selection: $selectedPresetID) {
+                        Text("Custom").tag(Optional<UUID>(nil))
+                        ForEach(presets) { preset in
+                            Text(preset.name).tag(Optional(preset.id))
+                        }
+                    }
+                    .frame(maxWidth: 260)
+                    .onChange(of: selectedPresetID) { id in
+                        guard let id, let preset = presets.first(where: { $0.id == id }) else { return }
+                        applySettings(preset.settings)
+                    }
+
+                    Button("Save Preset") {
+                        savePresetName = ""
+                        showSavePresetPrompt = true
+                    }
+                    if let id = selectedPresetID,
+                       let preset = presets.first(where: { $0.id == id }),
+                       !preset.isBuiltIn {
+                        Button("Delete Preset") {
+                            Task {
+                                await AdjustmentStore.shared.deleteUserPreset(id: id)
+                                await reloadPresetsAndSelection()
+                            }
+                        }
+                    }
+                }
+
+                ScrollView {
+                    VStack(spacing: 8) {
+                        adjustmentSlider(
+                            title: "Exposure",
+                            value: Binding(
+                                get: { settings.exposureEV },
+                                set: { newValue in
+                                    updateSettings { $0.exposureEV = min(max(newValue, -3), 3) }
+                                }
+                            ),
+                            range: -3...3,
+                            step: 0.1,
+                            valueText: String(format: "%.1f EV", settings.exposureEV)
+                        )
+                        adjustmentSlider(
+                            title: "Contrast",
+                            value: Binding(
+                                get: { settings.contrast },
+                                set: { newValue in
+                                    updateSettings { $0.contrast = min(max(newValue, 0.6), 1.8) }
+                                }
+                            ),
+                            range: 0.6...1.8,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.contrast)
+                        )
+                        adjustmentSlider(
+                            title: "Highlights",
+                            value: Binding(
+                                get: { settings.highlights },
+                                set: { newValue in
+                                    updateSettings { $0.highlights = min(max(newValue, -1), 1) }
+                                }
+                            ),
+                            range: -1...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.highlights)
+                        )
+                        adjustmentSlider(
+                            title: "Shadows",
+                            value: Binding(
+                                get: { settings.shadows },
+                                set: { newValue in
+                                    updateSettings { $0.shadows = min(max(newValue, -1), 1) }
+                                }
+                            ),
+                            range: -1...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.shadows)
+                        )
+                        adjustmentSlider(
+                            title: "Temp",
+                            value: Binding(
+                                get: { settings.temperature },
+                                set: { newValue in
+                                    updateSettings { $0.temperature = min(max(newValue, -1), 1) }
+                                }
+                            ),
+                            range: -1...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.temperature)
+                        )
+                        adjustmentSlider(
+                            title: "Tint",
+                            value: Binding(
+                                get: { settings.tint },
+                                set: { newValue in
+                                    updateSettings { $0.tint = min(max(newValue, -1), 1) }
+                                }
+                            ),
+                            range: -1...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.tint)
+                        )
+                        adjustmentSlider(
+                            title: "Vibrance",
+                            value: Binding(
+                                get: { settings.vibrance },
+                                set: { newValue in
+                                    updateSettings { $0.vibrance = min(max(newValue, -1), 1) }
+                                }
+                            ),
+                            range: -1...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.vibrance)
+                        )
+                        adjustmentSlider(
+                            title: "Saturation",
+                            value: Binding(
+                                get: { settings.saturation },
+                                set: { newValue in
+                                    updateSettings { $0.saturation = min(max(newValue, 0), 2) }
+                                }
+                            ),
+                            range: 0...2,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.saturation)
+                        )
+                        adjustmentSlider(
+                            title: "Rotate",
+                            value: Binding(
+                                get: { settings.rotateDegrees },
+                                set: { newValue in
+                                    updateSettings { $0.rotateDegrees = min(max(newValue, -180), 180) }
+                                }
+                            ),
+                            range: -180...180,
+                            step: 0.25,
+                            valueText: String(format: "%.1f°", settings.rotateDegrees)
+                        )
+                        adjustmentSlider(
+                            title: "Straighten",
+                            value: Binding(
+                                get: { settings.straightenDegrees },
+                                set: { newValue in
+                                    updateSettings { $0.straightenDegrees = min(max(newValue, -15), 15) }
+                                }
+                            ),
+                            range: -15...15,
+                            step: 0.1,
+                            valueText: String(format: "%.1f°", settings.straightenDegrees)
+                        )
+                        adjustmentSlider(
+                            title: "Crop Scale",
+                            value: Binding(
+                                get: { settings.cropScale },
+                                set: { newValue in
+                                    updateSettings { $0.cropScale = min(max(newValue, 0.4), 1) }
+                                }
+                            ),
+                            range: 0.4...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.cropScale)
+                        )
+                        adjustmentSlider(
+                            title: "Crop X",
+                            value: Binding(
+                                get: { settings.cropOffsetX },
+                                set: { newValue in
+                                    updateSettings { $0.cropOffsetX = min(max(newValue, -1), 1) }
+                                }
+                            ),
+                            range: -1...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.cropOffsetX)
+                        )
+                        adjustmentSlider(
+                            title: "Crop Y",
+                            value: Binding(
+                                get: { settings.cropOffsetY },
+                                set: { newValue in
+                                    updateSettings { $0.cropOffsetY = min(max(newValue, -1), 1) }
+                                }
+                            ),
+                            range: -1...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.cropOffsetY)
+                        )
+                    }
+                }
+
+                Text(viewModel.shortcutLegend)
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
                 HStack(spacing: 8) {
-                    Button("Green (Z)") {
+                    Button("Green") {
                         viewModel.tagSelectedAsKeep()
                     }
 
-                    Button("Red (X)") {
+                    Button("Red") {
                         viewModel.tagSelectedAsReject()
                     }
 
-                    Button("Clear (C)") {
+                    Button("Clear") {
                         viewModel.clearSelectedTag()
                     }
                 }
@@ -394,17 +642,230 @@ struct PreviewPane: View {
             }
         }
         .padding(16)
+        .alert("Save Preset", isPresented: $showSavePresetPrompt) {
+            TextField("Preset name", text: $savePresetName)
+            Button("Cancel", role: .cancel) { }
+            Button("Save") {
+                let name = savePresetName.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else { return }
+                Task {
+                    await AdjustmentStore.shared.savePreset(name: name, settings: settings)
+                    await reloadPresetsAndSelection(named: name)
+                }
+            }
+        }
         .task(id: viewModel.selectedAssetID) {
+            renderTask?.cancel()
+            persistTask?.cancel()
             guard let asset = viewModel.selectedAsset else {
+                sourceImage = nil
+                sourcePixelSize = .zero
                 previewImage = nil
+                settings = .default
+                presets = AdjustmentPreset.builtIns
+                selectedPresetID = nil
+                undoStack = []
+                redoStack = []
+                versionBSnapshot = nil
+                previewZoom = 1
                 return
             }
-            previewImage = await FullImageLoader.shared.image(for: asset.url)
+            async let loadedImage = FullImageLoader.shared.image(for: asset.url)
+            async let loadedSettings = AdjustmentStore.shared.adjustment(for: asset.url.path)
+            async let loadedPresets = AdjustmentStore.shared.presets()
+            async let versionBBookmark = AdjustmentStore.shared.bookmark(named: "Version B", for: asset.url.path)
+            let (image, storedSettings, availablePresets, versionB) = await (loadedImage, loadedSettings, loadedPresets, versionBBookmark)
+            sourcePixelSize = image?.size ?? .zero
+            sourceImage = Self.downscaledPreviewImage(from: image, maxLongEdge: 2048)
+            settings = storedSettings
+            presets = availablePresets
+            selectedPresetID = availablePresets.first(where: { $0.settings == storedSettings })?.id
+            undoStack = []
+            redoStack = []
+            versionBSnapshot = versionB?.settings
+            showOriginal = false
+            previewZoom = 1
+            schedulePreviewRender()
+        }
+    }
+
+    private func schedulePreviewRender() {
+        renderTask?.cancel()
+        guard let sourceImage else {
+            previewImage = nil
+            return
+        }
+        if showOriginal {
+            previewImage = sourceImage
+            return
+        }
+
+        let currentSettings = settings
+        renderTask = Task {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+            if Task.isCancelled {
+                return
+            }
+            let adjusted = await AdjustmentEngine.shared.apply(currentSettings, to: sourceImage)
+            if Task.isCancelled {
+                return
+            }
+            await MainActor.run {
+                self.previewImage = adjusted
+            }
+        }
+    }
+
+    private func updateSettings(_ update: (inout AdjustmentSettings) -> Void) {
+        var proposed = settings
+        update(&proposed)
+        guard proposed != settings else { return }
+        undoStack.append(settings)
+        if undoStack.count > 100 {
+            undoStack.removeFirst(undoStack.count - 100)
+        }
+        redoStack = []
+        settings = proposed
+        selectedPresetID = presets.first(where: { $0.settings == settings })?.id
+        schedulePreviewRender()
+        schedulePersist()
+    }
+
+    private func applySettings(_ value: AdjustmentSettings) {
+        guard value != settings else { return }
+        undoStack.append(settings)
+        if undoStack.count > 100 {
+            undoStack.removeFirst(undoStack.count - 100)
+        }
+        redoStack = []
+        settings = value
+        selectedPresetID = presets.first(where: { $0.settings == settings })?.id
+        schedulePreviewRender()
+        schedulePersist()
+    }
+
+    private func undo() {
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(settings)
+        settings = previous
+        selectedPresetID = presets.first(where: { $0.settings == settings })?.id
+        schedulePreviewRender()
+        schedulePersist()
+    }
+
+    private func redo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(settings)
+        settings = next
+        selectedPresetID = presets.first(where: { $0.settings == settings })?.id
+        schedulePreviewRender()
+        schedulePersist()
+    }
+
+    private func schedulePersist() {
+        persistTask?.cancel()
+        guard let asset = viewModel.selectedAsset else { return }
+        let assetPath = asset.url.path
+        let current = settings
+        let currentSourceSize = sourcePixelSize
+        persistTask = Task {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            if Task.isCancelled { return }
+            await AdjustmentStore.shared.saveAdjustment(current, for: assetPath)
+            await AdjustmentStore.shared.syncDerivedMetadata(
+                for: assetPath,
+                sourceSize: currentSourceSize,
+                settings: current
+            )
+            await EditedThumbnailCache.shared.invalidate(assetPath: assetPath)
+            await MainActor.run {
+                NotificationCenter.default.post(
+                    name: .darkroomAdjustmentDidChange,
+                    object: nil,
+                    userInfo: ["assetPath": assetPath]
+                )
+            }
+        }
+    }
+
+    private func reloadPresetsAndSelection(named selectedName: String? = nil) async {
+        let updated = await AdjustmentStore.shared.presets()
+        await MainActor.run {
+            presets = updated
+            if let selectedName, let match = updated.first(where: { $0.name == selectedName }) {
+                selectedPresetID = match.id
+            } else {
+                selectedPresetID = updated.first(where: { $0.settings == settings })?.id
+            }
+        }
+    }
+
+    private static func downscaledPreviewImage(from image: NSImage?, maxLongEdge: CGFloat) -> NSImage? {
+        guard let image else { return nil }
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return image }
+        let longEdge = max(size.width, size.height)
+        guard longEdge > maxLongEdge else { return image }
+
+        let scale = maxLongEdge / longEdge
+        let target = NSSize(width: floor(size.width * scale), height: floor(size.height * scale))
+        let output = NSImage(size: target)
+        output.lockFocus()
+        image.draw(
+            in: NSRect(origin: .zero, size: target),
+            from: NSRect(origin: .zero, size: size),
+            operation: .copy,
+            fraction: 1
+        )
+        output.unlockFocus()
+        return output
+    }
+
+    private var previewGesture: some Gesture {
+        SimultaneousGesture(
+            MagnificationGesture()
+                .updating($magnifyScale) { value, state, _ in
+                    state = value
+                }
+                .onEnded { value in
+                    previewZoom = max(1, min(8, previewZoom * value))
+                },
+            RotationGesture()
+                .updating($gestureRotation) { value, state, _ in
+                    state = value
+                }
+                .onEnded { value in
+                    let delta = value.degrees
+                    guard abs(delta) > 0.1 else { return }
+                    updateSettings { draft in
+                        draft.straightenDegrees = min(max(draft.straightenDegrees + delta, -15), 15)
+                    }
+                }
+        )
+    }
+
+    @ViewBuilder
+    private func adjustmentSlider(
+        title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        step: Double,
+        valueText: String
+    ) -> some View {
+        HStack {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 88, alignment: .leading)
+            Slider(value: value, in: range, step: step)
+            Text(valueText)
+                .font(.caption.monospacedDigit())
+                .frame(width: 70, alignment: .trailing)
         }
     }
 }
 
-struct ImportStatusBar: View {
+struct ExportStatusBar: View {
     @ObservedObject var viewModel: BrowserViewModel
 
     var body: some View {
@@ -413,13 +874,10 @@ struct ImportStatusBar: View {
             Text("Visible: \(viewModel.visiblePhotoAssets.count)")
             Text("Green: \(viewModel.keepCount)")
             Text("Red: \(viewModel.rejectCount)")
-            Text("Staged: \(viewModel.stagedPhotoAssets.count)")
-            if viewModel.isImporting {
-                Text("Importing...")
-            }
+            Text("Queued: \(viewModel.exportQueueCounts.queued)")
             Spacer()
-            if let importStatus = viewModel.importStatus {
-                Text(importStatus)
+            if let exportStatus = viewModel.exportStatus {
+                Text(exportStatus)
                     .lineLimit(1)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -428,167 +886,7 @@ struct ImportStatusBar: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .font(.caption)
-    }
-}
-
-struct ImportStagingTray: View {
-    @ObservedObject var viewModel: BrowserViewModel
-    @State private var isDropTargeted = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label("Import Staging Tray", systemImage: "tray.and.arrow.down")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Button("Clear Manual") {
-                    viewModel.clearManualStaging()
-                }
-                .disabled(viewModel.stagedAssetIDs.isEmpty)
-            }
-
-            HStack(spacing: 10) {
-                Picker("Rename", selection: $viewModel.importOptions.renameTemplate) {
-                    ForEach(ImportRenameTemplate.allCases) { template in
-                        Text(template.title).tag(template)
-                    }
-                }
-                .frame(width: 210)
-
-                if viewModel.importOptions.renameTemplate == .customPrefix {
-                    TextField("Custom prefix", text: $viewModel.importOptions.customPrefix)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 180)
-                }
-
-                Button("Choose Export Path") {
-                    chooseExportPath()
-                }
-
-                TextField("Folder name (required)", text: $viewModel.importOptions.exportFolderName)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 180)
-
-                TextField("Creator", text: $viewModel.importOptions.metadata.creator)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 140)
-
-                TextField("Keywords", text: $viewModel.importOptions.metadata.keywords)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 140)
-            }
-
-            TextField("Import note / metadata tweak", text: $viewModel.importOptions.metadata.note)
-                .textFieldStyle(.roundedBorder)
-
-            if !viewModel.importOptions.exportBasePath.isEmpty {
-                Text("Export path: \(viewModel.importOptions.exportBasePath)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("Export path not set")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            if viewModel.stagedPhotoAssets.isEmpty {
-                Text("Drop photos here from the grid, or tag photos Green to auto-stage.")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 6)
-            } else {
-                ScrollView(.horizontal) {
-                    HStack(spacing: 8) {
-                        ForEach(viewModel.stagedPhotoAssets) { asset in
-                            StagedAssetChip(
-                                asset: asset,
-                                state: viewModel.importItemStates[asset.id],
-                                isAutoStaged: viewModel.tag(for: asset) == .keep
-                            ) {
-                                viewModel.unstageAsset(withID: asset.id)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color(NSColor.controlBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(isDropTargeted ? .green : .clear, lineWidth: 2)
-        )
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .onDrop(of: [UTType.text.identifier], isTargeted: $isDropTargeted) { providers in
-            for provider in providers where provider.canLoadObject(ofClass: NSString.self) {
-                _ = provider.loadObject(ofClass: NSString.self) { item, _ in
-                    guard let id = item as? String else { return }
-                    Task { @MainActor in
-                        viewModel.stageAsset(withID: id)
-                    }
-                }
-            }
-            return true
-        }
-    }
-
-    private func chooseExportPath() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Choose"
-        panel.message = "Choose base export directory"
-        if panel.runModal() == .OK, let url = panel.url {
-            viewModel.importOptions.exportBasePath = url.path
-        }
-    }
-}
-
-struct StagedAssetChip: View {
-    let asset: PhotoAsset
-    let state: ImportItemState?
-    let isAutoStaged: Bool
-    let onRemove: () -> Void
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Text(asset.filename)
-                .lineLimit(1)
-                .font(.caption)
-            if let state {
-                Text(label(for: state))
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-            if !isAutoStaged {
-                Button {
-                    onRemove()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(.thinMaterial, in: Capsule())
-    }
-
-    private func label(for state: ImportItemState) -> String {
-        switch state {
-        case .queued: return "Queued"
-        case .hashing: return "Hashing"
-        case .copying: return "Copying"
-        case .verifying: return "Verifying"
-        case .done: return "Done"
-        case .skippedDuplicate: return "Duplicate"
-        case .failed: return "Failed"
-        }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -623,10 +921,10 @@ struct ThumbnailCell: View {
     let asset: PhotoAsset
     let isSelected: Bool
     let tag: PhotoTag?
-    let importState: ImportItemState?
-    let isAlreadyImported: Bool
+    let rating: Int
 
     @State private var image: NSImage?
+    @State private var loadTask: Task<Void, Never>?
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -652,6 +950,17 @@ struct ThumbnailCell: View {
                     .padding(4)
                     .background(.thinMaterial, in: Capsule())
                     .padding(6)
+
+                if rating > 0 {
+                    Text(String(repeating: "★", count: rating))
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(.black.opacity(0.5), in: Capsule())
+                        .foregroundStyle(.yellow)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                }
             }
 
             if let tag {
@@ -659,28 +968,6 @@ struct ThumbnailCell: View {
                     .font(.title3)
                     .foregroundStyle(tag == .keep ? .green : .red)
                     .padding(8)
-            }
-
-            if let importState {
-                Text(importStateLabel(importState))
-                    .font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(.black.opacity(0.55), in: Capsule())
-                    .foregroundStyle(.white)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            }
-
-            if isAlreadyImported {
-                Text("Already Imported")
-                    .font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(.green.opacity(0.85), in: Capsule())
-                    .foregroundStyle(.white)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
             }
         }
         .saturation(tag == .reject ? 0 : 1)
@@ -691,167 +978,259 @@ struct ThumbnailCell: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
+        .accessibilityElement()
+        .accessibilityLabel(accessibilityLabel)
         .task(id: asset.id) {
-            image = await ThumbnailCache.shared.thumbnail(for: asset.url, size: CGSize(width: 320, height: 320))
+            reloadThumbnail()
+        }
+        .onDisappear {
+            loadTask?.cancel()
+            loadTask = nil
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .darkroomAdjustmentDidChange)) { notification in
+            guard let changedPath = notification.userInfo?["assetPath"] as? String,
+                  changedPath == asset.url.path else {
+                return
+            }
+            reloadThumbnail()
         }
     }
 
-    private func importStateLabel(_ state: ImportItemState) -> String {
-        switch state {
-        case .queued: return "Queued"
-        case .hashing: return "Hashing"
-        case .copying: return "Copying"
-        case .verifying: return "Verifying"
-        case .done: return "Done"
-        case .skippedDuplicate: return "Duplicate"
-        case .failed: return "Failed"
+    private var accessibilityLabel: String {
+        var parts: [String] = [asset.filename]
+        if let tag {
+            parts.append(tag == .keep ? "Green tagged" : "Red tagged")
+        } else {
+            parts.append("Untagged")
+        }
+        if rating > 0 {
+            parts.append("Rating \(rating) stars")
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private func reloadThumbnail() {
+        loadTask?.cancel()
+        loadTask = Task {
+            guard let base = await ThumbnailCache.shared.thumbnail(for: asset.url, size: CGSize(width: 320, height: 320)) else {
+                await MainActor.run { image = nil }
+                return
+            }
+            let settings = await AdjustmentStore.shared.adjustment(for: asset.url.path)
+            let rendered = await EditedThumbnailCache.shared.thumbnail(
+                for: asset.url.path,
+                baseImage: base,
+                settings: settings
+            ) ?? base
+            if Task.isCancelled {
+                return
+            }
+            await MainActor.run {
+                image = rendered
+            }
         }
     }
 }
 
-struct ImportHistorySheet: View {
+struct ExportQueueSheet: View {
     @ObservedObject var viewModel: BrowserViewModel
     @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationSplitView {
-            List(selection: $viewModel.selectedImportSessionID) {
-                ForEach(viewModel.recentImportSessions) { session in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(session.sourceVolumeName)
-                            .font(.headline)
-                        Text(session.startedAt.formatted(date: .abbreviated, time: .shortened))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        HStack {
-                            Text("Imported \(session.importedCount) • Duplicates \(session.duplicateCount) • Failed \(session.failedCount)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            if session.failedCount > 0 {
-                                Button("Retry Failed") {
-                                    viewModel.retryFailedImports(for: session.id)
-                                }
-                                .buttonStyle(.link)
-                            }
-                        }
-                        Text("Rename: \(session.renameTemplate) • Collection: \(session.destinationCollection.isEmpty ? "Default" : session.destinationCollection)")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        if !session.metadataNote.isEmpty {
-                            Text(session.metadataNote)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .tag(session.id)
-                }
-            }
-            .navigationTitle("Import History")
-        } detail: {
-            if viewModel.selectedSessionItems.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "tray")
-                        .font(.system(size: 28))
-                        .foregroundStyle(.secondary)
-                    Text("No Items")
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                List(viewModel.selectedSessionItems) { item in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(item.filename)
-                            Spacer()
-                            Text(statusText(item.state))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Text(item.sourceRelativePath)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if let error = item.errorMessage {
-                            Text(error)
-                                .font(.caption)
-                                .foregroundStyle(.red)
-                        }
-                    }
-                }
-                .navigationTitle("Session Items")
-            }
-        }
-        .frame(minWidth: 920, minHeight: 500)
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Button("Refresh") {
-                    viewModel.refreshImportHistory()
-                }
-            }
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Close") {
-                    dismiss()
-                }
-            }
-        }
-    }
-
-    private func statusText(_ state: ImportItemState) -> String {
-        switch state {
-        case .queued: return "Queued"
-        case .hashing: return "Hashing"
-        case .copying: return "Copying"
-        case .verifying: return "Verifying"
-        case .done: return "Done"
-        case .skippedDuplicate: return "Skipped duplicate"
-        case .failed: return "Failed"
-        }
-    }
-}
-
-struct ImportActivitySheet: View {
-    @ObservedObject var viewModel: BrowserViewModel
-    @Environment(\.dismiss) private var dismiss
+    @State private var showsPresetEditor = false
+    @State private var presetDraft = ExportPreset(name: "New Preset", fileFormat: .jpeg, longEdgePixels: 3000, quality: 0.9)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if viewModel.activityEntries.isEmpty {
-                Text("No activity yet.")
-                    .foregroundStyle(.secondary)
-            } else {
-                List(viewModel.activityEntries) { entry in
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: entry.isError ? "exclamationmark.triangle.fill" : "clock.arrow.circlepath")
-                            .foregroundStyle(entry.isError ? .red : .secondary)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(entry.title)
-                                .font(.headline)
-                            Text(entry.detail)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(entry.createdAt.formatted(date: .abbreviated, time: .standard))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        if let sessionID = entry.sessionID {
-                            HStack(spacing: 8) {
-                                Button("Open Session") {
-                                    viewModel.selectedImportSessionID = sessionID
-                                }
-                                if entry.isError {
-                                    Button("Retry Failed") {
-                                        viewModel.retryFailedImports(for: sessionID)
-                                    }
-                                }
+            Text("Export Queue")
+                .font(.headline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 10) {
+                Picker("Preset", selection: $viewModel.selectedExportPresetID) {
+                    ForEach(viewModel.exportPresets) { preset in
+                        Text(preset.name).tag(Optional(preset.id))
+                    }
+                }
+                .frame(width: 220)
+
+                Button("New Preset") {
+                    presetDraft = ExportPreset(name: "New Preset", fileFormat: .jpeg, longEdgePixels: 3000, quality: 0.9)
+                    showsPresetEditor = true
+                }
+                .accessibilityLabel("Create export preset")
+
+                Button("Edit Preset") {
+                    if let preset = viewModel.selectedExportPreset {
+                        presetDraft = preset
+                        showsPresetEditor = true
+                    }
+                }
+                .disabled(viewModel.selectedExportPreset == nil)
+                .accessibilityLabel("Edit selected export preset")
+
+                Button("Delete Preset") {
+                    viewModel.deleteSelectedExportPreset()
+                }
+                .disabled(viewModel.exportPresets.count <= 1)
+                .accessibilityLabel("Delete selected export preset")
+            }
+            .buttonStyle(.bordered)
+
+            HStack(spacing: 10) {
+                TextField("Shoot name", text: $viewModel.exportDestination.shootName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 180)
+
+                TextField("Subfolder template", text: $viewModel.exportDestination.subfolderTemplate)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(minWidth: 220)
+
+                Button("Choose Path") {
+                    chooseExportPath()
+                }
+                .accessibilityLabel("Choose export destination path")
+
+                if !viewModel.recentExportDestinations.isEmpty {
+                    Menu("Recent") {
+                        ForEach(viewModel.recentExportDestinations, id: \.self) { path in
+                            Button(path) {
+                                viewModel.useRecentExportDestination(path)
                             }
                         }
                     }
-                    .padding(.vertical, 4)
                 }
+                Spacer(minLength: 0)
+            }
+
+            if !viewModel.exportDestination.basePath.isEmpty {
+                Text("Base path: \(viewModel.exportDestination.basePath)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else {
+                Text("Base path not set")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(alignment: .center, spacing: 12) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        Button("Enqueue Green Tagged") {
+                            viewModel.enqueueGreenTaggedForExport()
+                        }
+                        .accessibilityLabel("Add green-tagged photos to export queue")
+                        Button("Start Queue") {
+                            viewModel.startExportQueue()
+                        }
+                        .disabled(!viewModel.hasValidExportDestination || viewModel.isExporting)
+                        .accessibilityLabel("Start export queue")
+
+                        Button("Cancel") {
+                            viewModel.cancelExportQueue()
+                        }
+                        .disabled(!viewModel.isExporting)
+                        .accessibilityLabel("Cancel export queue")
+
+                        Button("Retry Failed") {
+                            viewModel.retryFailedExports()
+                        }
+                        .accessibilityLabel("Retry failed exports")
+
+                        Button("Clear Completed") {
+                            viewModel.clearCompletedExports()
+                        }
+                        .accessibilityLabel("Clear completed exports")
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                let counts = viewModel.exportQueueCounts
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("Pending \(counts.queued) • Done \(counts.done) • Failed \(counts.failed) • Cancelled \(counts.cancelled)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    if let eta = viewModel.estimatedExportRemaining {
+                        Text("ETA \(formattedETA(eta))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            List(viewModel.exportQueue) { item in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(item.asset.filename)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Text(statusLabel(item.state))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(item.asset.url.path)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let destinationPath = item.destinationPath {
+                        HStack(spacing: 8) {
+                            Text(destinationPath)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Button("Reveal") {
+                                viewModel.revealExportedItem(item)
+                            }
+                            .buttonStyle(.link)
+                        }
+                    }
+                    if let bytes = item.bytesWritten {
+                        Text(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let warningMessage = item.warningMessage {
+                        Text(warningMessage)
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                    if let errorMessage = item.errorMessage {
+                        Text(errorMessage)
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    }
+                    HStack {
+                        Spacer()
+                        Button("Remove") {
+                            viewModel.removeExportItem(id: item.id)
+                        }
+                        .buttonStyle(.link)
+                    }
+                }
+                .padding(.vertical, 2)
             }
         }
         .padding(12)
-        .frame(minWidth: 760, minHeight: 460)
+        .frame(minWidth: 920, minHeight: 500)
+        .sheet(isPresented: $showsPresetEditor) {
+            ExportPresetEditorSheet(
+                draft: $presetDraft,
+                onCancel: { showsPresetEditor = false },
+                onSave: {
+                    if viewModel.exportPresets.contains(where: { $0.id == presetDraft.id }) {
+                        viewModel.updateSelectedExportPreset(presetDraft)
+                    } else {
+                        viewModel.addExportPreset(presetDraft)
+                    }
+                    showsPresetEditor = false
+                }
+            )
+        }
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Close") {
@@ -859,50 +1238,6 @@ struct ImportActivitySheet: View {
                 }
             }
         }
-    }
-}
-
-struct ExportSetupSheet: View {
-    @ObservedObject var viewModel: BrowserViewModel
-    let onConfirm: () -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Set Export Destination")
-                .font(.headline)
-            Text("Output format will be `YYYY-MM-DD/<photo-name>` under the selected base path and folder name.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            HStack {
-                Button("Choose Export Path") {
-                    chooseExportPath()
-                }
-                if !viewModel.importOptions.exportBasePath.isEmpty {
-                    Text(viewModel.importOptions.exportBasePath)
-                        .lineLimit(1)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            TextField("Folder name", text: $viewModel.importOptions.exportFolderName)
-                .textFieldStyle(.roundedBorder)
-
-            HStack {
-                Spacer()
-                Button("Cancel") {
-                    dismiss()
-                }
-                Button("Continue") {
-                    onConfirm()
-                }
-                .disabled(!viewModel.hasValidExportTarget)
-            }
-        }
-        .padding(16)
-        .frame(minWidth: 540)
     }
 
     private func chooseExportPath() {
@@ -913,7 +1248,95 @@ struct ExportSetupSheet: View {
         panel.prompt = "Choose"
         panel.message = "Choose base export directory"
         if panel.runModal() == .OK, let url = panel.url {
-            viewModel.importOptions.exportBasePath = url.path
+            viewModel.setExportBasePath(url.path)
         }
     }
+
+    private func statusLabel(_ state: ExportItemState) -> String {
+        switch state {
+        case .queued: return "Queued"
+        case .rendering: return "Rendering"
+        case .writing: return "Writing"
+        case .done: return "Done"
+        case .failed: return "Failed"
+        case .cancelled: return "Cancelled"
+        }
+    }
+
+    private func formattedETA(_ seconds: TimeInterval) -> String {
+        let rounded = Int(seconds.rounded())
+        let minutes = rounded / 60
+        let remainder = rounded % 60
+        return String(format: "%dm %02ds", minutes, remainder)
+    }
+}
+
+struct ExportPresetEditorSheet: View {
+    @Binding var draft: ExportPreset
+    let onCancel: () -> Void
+    let onSave: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Export Preset")
+                .font(.headline)
+
+            TextField("Preset name", text: $draft.name)
+                .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Picker("Format", selection: $draft.fileFormat) {
+                    ForEach(ExportFileFormat.allCases) { format in
+                        Text(format.title).tag(format)
+                    }
+                }
+                Picker("Color Space", selection: $draft.colorSpace) {
+                    ForEach(ExportColorSpace.allCases) { space in
+                        Text(space.title).tag(space)
+                    }
+                }
+            }
+
+            HStack {
+                Text("Long edge")
+                TextField("Pixels (0 = original)", value: $draft.longEdgePixels, formatter: NumberFormatter())
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 140)
+            }
+
+            HStack {
+                Text("Quality")
+                Slider(value: $draft.quality, in: 0.35...1.0, step: 0.01)
+                Text(String(format: "%.2f", draft.quality))
+                    .frame(width: 48)
+            }
+
+            HStack {
+                Text("Max size")
+                TextField("KB (0 = disabled)", value: $draft.maxFileSizeKB, formatter: NumberFormatter())
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 140)
+            }
+
+            Toggle("Strip metadata", isOn: $draft.stripMetadata)
+            Toggle("Watermark", isOn: $draft.watermarkEnabled)
+            if draft.watermarkEnabled {
+                TextField("Watermark text", text: $draft.watermarkText)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { onCancel() }
+                Button("Save") { onSave() }
+                    .disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(14)
+        .frame(minWidth: 460)
+    }
+}
+
+extension Notification.Name {
+    static let darkroomAdjustmentDidChange = Notification.Name("darkroom.adjustment.didChange")
 }

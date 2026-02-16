@@ -7,6 +7,14 @@ enum MetadataWriteOutcome {
     case sidecar
 }
 
+struct MetadataTweaks: Codable, Hashable {
+    var creator: String
+    var keywords: String
+    var note: String
+
+    static let empty = MetadataTweaks(creator: "", keywords: "", note: "")
+}
+
 struct MetadataSidecarRecord: Codable {
     let createdAt: Date
     let destinationPath: String
@@ -23,7 +31,7 @@ actor MetadataWriter {
     private let fileManager = FileManager.default
 
     func applyTweaks(
-        _ tweaks: ImportMetadataTweaks,
+        _ tweaks: MetadataTweaks,
         destinationURL: URL,
         contentHash: String,
         manifestsRoot: URL
@@ -40,13 +48,13 @@ actor MetadataWriter {
         return .sidecar
     }
 
-    private func hasTweaks(_ tweaks: ImportMetadataTweaks) -> Bool {
+    private func hasTweaks(_ tweaks: MetadataTweaks) -> Bool {
         !tweaks.creator.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         || !tweaks.keywords.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         || !tweaks.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private func writeEmbeddedMetadata(_ tweaks: ImportMetadataTweaks, to url: URL) throws -> Bool {
+    private func writeEmbeddedMetadata(_ tweaks: MetadataTweaks, to url: URL) throws -> Bool {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let sourceType = CGImageSourceGetType(source) else {
             return false
@@ -81,7 +89,7 @@ actor MetadataWriter {
         return true
     }
 
-    private func mergedMetadata(original: [CFString: Any], tweaks: ImportMetadataTweaks) -> [CFString: Any] {
+    private func mergedMetadata(original: [CFString: Any], tweaks: MetadataTweaks) -> [CFString: Any] {
         var result = original
         var iptc = (result[kCGImagePropertyIPTCDictionary] as? [CFString: Any]) ?? [:]
         var exif = (result[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
@@ -111,7 +119,7 @@ actor MetadataWriter {
     }
 
     private func writeSidecarMetadata(
-        _ tweaks: ImportMetadataTweaks,
+        _ tweaks: MetadataTweaks,
         destinationURL: URL,
         contentHash: String,
         manifestsRoot: URL

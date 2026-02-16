@@ -1,6 +1,6 @@
 # Darkroom
 
-SwiftUI macOS photo workflow app.
+SwiftUI macOS photo export workflow app for rapid culling, adjustments, and delivery.
 
 ## Build A Launchable App
 

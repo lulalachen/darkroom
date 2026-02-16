@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct DarkroomApp: App {
     @StateObject private var viewModel = BrowserViewModel()
+    @StateObject private var preferences = AppPreferences.shared
     
     init() {
         if let url = appIconURL(),
@@ -16,18 +17,32 @@ struct DarkroomApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(viewModel)
+                .environmentObject(preferences)
                 .task {
-                    await viewModel.prepareLibraryIfNeeded()
+                    await viewModel.bootstrapForExportWorkflow()
                 }
         }
         .defaultSize(width: 1200, height: 720)
+
+        Settings {
+            PreferencesView()
+                .environmentObject(preferences)
+        }
     }
 
     private func appIconURL() -> URL? {
         #if SWIFT_PACKAGE
-        return Bundle.module.url(forResource: "AppIcon", withExtension: "png")
+        return Bundle.module.url(
+            forResource: "darkroom_appicon_1024_opaque",
+            withExtension: "png",
+            subdirectory: "AppIcon.icon/Assets"
+        )
         #else
-        return Bundle.main.url(forResource: "AppIcon", withExtension: "png")
+        return Bundle.main.url(
+            forResource: "darkroom_appicon_1024_opaque",
+            withExtension: "png",
+            subdirectory: "AppIcon.icon/Assets"
+        )
         #endif
     }
 }

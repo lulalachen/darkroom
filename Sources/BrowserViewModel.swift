@@ -1,8 +1,21 @@
+import AppKit
 import Combine
 import Foundation
+import UserNotifications
+
+let darkroomShortcutExportRequestDefaultsKey = "darkroom.shortcut.export.request"
 
 @MainActor
 final class BrowserViewModel: ObservableObject {
+    private static let lastExportPathDefaultsKey = "darkroom.lastExportPath"
+    private static let exportPresetsDefaultsKey = "darkroom.exportPresets.v1"
+    private static let selectedExportPresetDefaultsKey = "darkroom.selectedExportPresetID"
+    private static let exportSubfolderTemplateDefaultsKey = "darkroom.exportSubfolderTemplate"
+    private static let exportShootNameDefaultsKey = "darkroom.exportShootName"
+    private static let exportRecentDestinationsDefaultsKey = "darkroom.exportRecentDestinations.v1"
+    private static let exportQueueCacheFilename = "export-queue-cache.json"
+    private static let ratingsDefaultsKey = "darkroom.asset.ratings.v1"
+
     enum AssetFilter: String, CaseIterable, Identifiable {
         case all
         case keep
@@ -13,19 +26,16 @@ final class BrowserViewModel: ObservableObject {
 
         var title: String {
             switch self {
-            case .all:
-                return "All"
-            case .keep:
-                return "Green"
-            case .reject:
-                return "Red"
-            case .untagged:
-                return "Untagged"
+            case .all: return "All"
+            case .keep: return "Green"
+            case .reject: return "Red"
+            case .untagged: return "Untagged"
             }
         }
     }
 
     @Published private(set) var volumes: [Volume] = []
+    @Published private(set) var libraryVolume: Volume?
     @Published var selectedVolume: Volume? {
         didSet {
             guard selectedVolume != oldValue else { return }
@@ -35,26 +45,34 @@ final class BrowserViewModel: ObservableObject {
     @Published private(set) var photoAssets: [PhotoAsset] = []
     @Published var selectedAssetID: PhotoAsset.ID?
     @Published private(set) var tags: [PhotoAsset.ID: PhotoTag] = [:]
+    @Published private(set) var ratings: [PhotoAsset.ID: Int] = [:]
     @Published var assetFilter: AssetFilter = .all {
         didSet {
             ensureSelectedAssetVisible()
         }
     }
     @Published var isLoadingAssets: Bool = false
-    @Published private(set) var isImporting: Bool = false
-    @Published private(set) var importStatus: String?
     @Published private(set) var gridColumnCount: Int = 1
-    @Published var importOptions: ImportOptions = .default
-    @Published private(set) var importItemStates: [PhotoAsset.ID: ImportItemState] = [:]
-    @Published private(set) var alreadyImportedAssetIDs: Set<PhotoAsset.ID> = []
-    @Published private(set) var recentImportSessions: [ImportSessionSummary] = []
-    @Published private(set) var selectedSessionItems: [ImportQueueItem] = []
-    @Published private(set) var activityEntries: [ImportActivityEntry] = []
-    @Published private(set) var stagedAssetIDs: [PhotoAsset.ID] = []
-    @Published var selectedImportSessionID: Int64? {
+    @Published private(set) var shortcutProfile: KeyboardShortcutProfile = .classicZXC
+    @Published private(set) var isExporting: Bool = false
+    @Published private(set) var exportStatus: String?
+    @Published private(set) var exportQueue: [ExportQueueItem] = [] {
+        didSet { Self.persistExportQueue(exportQueue) }
+    }
+    @Published private(set) var recentExportDestinations: [String] = []
+    @Published var exportPresets: [ExportPreset] = ExportPreset.starterPresets {
+        didSet { persistExportPresets() }
+    }
+    @Published var selectedExportPresetID: ExportPreset.ID? {
         didSet {
-            guard selectedImportSessionID != oldValue else { return }
-            loadSelectedSessionItems()
+            UserDefaults.standard.set(selectedExportPresetID?.uuidString, forKey: Self.selectedExportPresetDefaultsKey)
+            recentExportDestinations = loadRecentDestinations(for: selectedExportPresetID)
+        }
+    }
+    @Published var exportDestination: ExportDestinationOptions = .default {
+        didSet {
+            UserDefaults.standard.set(exportDestination.subfolderTemplate, forKey: Self.exportSubfolderTemplateDefaultsKey)
+            UserDefaults.standard.set(exportDestination.shootName, forKey: Self.exportShootNameDefaultsKey)
         }
     }
 
@@ -65,8 +83,11 @@ final class BrowserViewModel: ObservableObject {
     private let volumeWatcher: VolumeWatcher
     private let enumerator = PhotoEnumerator()
     private let libraryManager: LibraryManager
-    private let importManager: ImportManager
+    private let exportManager = ExportManager()
     private let finderTagManager = FinderTagManager()
+    private var shortcutObserver: NSObjectProtocol?
+    private var preferenceObserver: NSObjectProtocol?
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var cancellables: Set<AnyCancellable> = []
 
     var selectedAsset: PhotoAsset? {
@@ -82,6 +103,15 @@ final class BrowserViewModel: ObservableObject {
         tags.values.filter { $0 == .reject }.count
     }
 
+    var shortcutLegend: String {
+        switch shortcutProfile {
+        case .classicZXC:
+            return "Shortcuts: Z = Green, X = Red, C = Clear, R = Cycle rating"
+        case .numeric120:
+            return "Shortcuts: 1 = Green, 2 = Red, 0 = Clear, R = Cycle rating"
+        }
+    }
+
     var visiblePhotoAssets: [PhotoAsset] {
         switch assetFilter {
         case .all:
@@ -95,24 +125,76 @@ final class BrowserViewModel: ObservableObject {
         }
     }
 
-    var stagedPhotoAssets: [PhotoAsset] {
-        let auto = Set(photoAssets.filter { tags[$0.id] == .keep }.map(\.id))
-        let manual = Set(stagedAssetIDs)
-        let all = auto.union(manual)
-        return photoAssets.filter { all.contains($0.id) }
+    var greenTaggedAssets: [PhotoAsset] {
+        photoAssets.filter { tags[$0.id] == .keep }
     }
 
     init(volumeWatcher: VolumeWatcher? = nil, libraryManager: LibraryManager = .shared, mockVolumes: [Volume]? = nil) {
         let watcher = volumeWatcher ?? VolumeWatcher()
         self.volumeWatcher = watcher
         self.libraryManager = libraryManager
-        self.importManager = ImportManager(libraryManager: libraryManager)
+
+        let exportPath = UserDefaults.standard.string(forKey: Self.lastExportPathDefaultsKey) ?? ""
+        self.exportDestination.basePath = exportPath
+        self.exportDestination.subfolderTemplate = UserDefaults.standard.string(forKey: Self.exportSubfolderTemplateDefaultsKey) ?? "{date}-{shoot}"
+        self.exportDestination.shootName = UserDefaults.standard.string(forKey: Self.exportShootNameDefaultsKey) ?? "Session"
+        self.exportPresets = Self.loadPersistedExportPresets() ?? ExportPreset.starterPresets
+        if let selectedPresetRaw = UserDefaults.standard.string(forKey: Self.selectedExportPresetDefaultsKey),
+           let selectedPresetID = UUID(uuidString: selectedPresetRaw),
+           self.exportPresets.contains(where: { $0.id == selectedPresetID }) {
+            self.selectedExportPresetID = selectedPresetID
+        } else {
+            self.selectedExportPresetID = self.exportPresets.first?.id
+        }
+        self.recentExportDestinations = self.loadRecentDestinations(for: self.selectedExportPresetID)
+        self.exportQueue = Self.loadPersistedExportQueue().map { item in
+            var mutable = item
+            if mutable.state == .rendering || mutable.state == .writing {
+                mutable.state = .queued
+                mutable.errorMessage = "Recovered after app relaunch."
+            }
+            return mutable
+        }
+
         if let mockVolumes {
             self.volumes = mockVolumes
             self.selectedVolume = mockVolumes.first
         } else {
             bindVolumeUpdates()
             watcher.refresh()
+        }
+        applyRuntimePreferences()
+        installPreferenceObserver()
+        installMemoryPressureHandler()
+        installShortcutObserver()
+    }
+
+    deinit {
+        if let shortcutObserver {
+            DistributedNotificationCenter.default().removeObserver(shortcutObserver)
+        }
+        if let preferenceObserver {
+            NotificationCenter.default.removeObserver(preferenceObserver)
+        }
+        memoryPressureSource?.cancel()
+    }
+
+    func bootstrapForExportWorkflow() async {
+        do {
+            let paths = try await libraryManager.bootstrapIfNeeded()
+            libraryVolume = Volume(
+                url: paths.originalsRoot,
+                name: "Darkroom Library",
+                isRemovable: false,
+                isInternal: true,
+                capacity: nil
+            )
+            if selectedVolume == nil {
+                selectedVolume = volumes.first { $0.isLikelyCameraCard } ?? libraryVolume ?? volumes.first
+            }
+            resumePendingExportsIfNeeded()
+        } catch {
+            exportStatus = "Could not initialize library: \(error.localizedDescription)"
         }
     }
 
@@ -136,163 +218,190 @@ final class BrowserViewModel: ObservableObject {
         tags[asset.id]
     }
 
-    func importMarkedPhotos() {
-        guard !isImporting else { return }
-        let marked = stagedPhotoAssets
-        let currentVolume = selectedVolume
-        guard !marked.isEmpty else {
-            importStatus = "No photos staged for import yet."
+    func rating(for asset: PhotoAsset) -> Int {
+        ratings[asset.id] ?? 0
+    }
+
+    func setExportBasePath(_ path: String) {
+        exportDestination.basePath = path
+        UserDefaults.standard.set(path, forKey: Self.lastExportPathDefaultsKey)
+    }
+
+    func applyRuntimePreferences() {
+        shortcutProfile = AppPreferences.shared.shortcutProfile
+        Task {
+            await ThumbnailCache.shared.configure(maxEntries: AppPreferences.shared.thumbnailCacheEntryLimit)
+            await FullImageLoader.shared.configure(maxEntries: AppPreferences.shared.fullImageCacheCount)
+            await EditedThumbnailCache.shared.configure(maxEntries: max(64, AppPreferences.shared.thumbnailCacheEntryLimit / 2))
+        }
+    }
+
+    var selectedExportPreset: ExportPreset? {
+        guard let selectedExportPresetID else { return exportPresets.first }
+        return exportPresets.first(where: { $0.id == selectedExportPresetID }) ?? exportPresets.first
+    }
+
+    var hasValidExportDestination: Bool {
+        let path = exportDestination.basePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !path.isEmpty && selectedExportPreset != nil
+    }
+
+    var estimatedExportRemaining: TimeInterval? {
+        let completed = exportQueue.filter { $0.state == .done && $0.startedAt != nil && $0.completedAt != nil }
+        guard !completed.isEmpty else { return nil }
+        let average = completed
+            .map { ($0.completedAt ?? Date()).timeIntervalSince($0.startedAt ?? Date()) }
+            .reduce(0, +) / Double(completed.count)
+        let pending = exportQueue.filter { $0.state == .queued || $0.state == .rendering || $0.state == .writing }.count
+        guard pending > 0 else { return nil }
+        return average * Double(pending)
+    }
+
+    var exportQueueCounts: (queued: Int, done: Int, failed: Int, cancelled: Int) {
+        var queued = 0
+        var done = 0
+        var failed = 0
+        var cancelled = 0
+        for item in exportQueue {
+            switch item.state {
+            case .queued, .rendering, .writing:
+                queued += 1
+            case .done:
+                done += 1
+            case .failed:
+                failed += 1
+            case .cancelled:
+                cancelled += 1
+            }
+        }
+        return (queued, done, failed, cancelled)
+    }
+
+    func enqueueGreenTaggedForExport() {
+        enqueueForExport(assets: greenTaggedAssets, statusPrefix: "Queued")
+    }
+
+    func enqueueSelectedForExport() {
+        guard let selectedAsset else {
+            exportStatus = "Select a photo to queue for export."
+            return
+        }
+        enqueueForExport(assets: [selectedAsset], statusPrefix: "Queued")
+    }
+
+    func startExportQueue() {
+        guard !isExporting else { return }
+        guard hasValidExportDestination else {
+            exportStatus = "Choose export path and preset first."
+            return
+        }
+        guard let preset = selectedExportPreset else {
+            exportStatus = "No export preset selected."
+            return
+        }
+        guard exportQueue.contains(where: { !$0.state.isTerminal }) else {
+            exportStatus = "No pending exports in queue."
             return
         }
 
-        isImporting = true
-        importStatus = "Importing \(marked.count) photo(s)..."
-        recordActivity(
-            title: "Import Started",
-            detail: "Staged \(marked.count) photo(s) for import.",
-            sessionID: nil,
-            isError: false
-        )
+        isExporting = true
+        exportStatus = "Export queue running..."
+        rememberRecentDestination(exportDestination.basePath, for: preset.id)
+        requestNotificationPermissionIfNeeded()
+        let queueSnapshot = exportQueue
+        let destination = exportDestination
 
         Task {
             do {
-                let result = try await importManager.importAssets(
-                    marked,
-                    sourceVolume: currentVolume,
-                    options: importOptions
+                let summary = try await exportManager.runQueue(
+                    items: queueSnapshot,
+                    preset: preset,
+                    destination: destination
                 ) { [weak self] snapshot in
                     Task { @MainActor in
-                        self?.setImportState(forSourcePath: snapshot.item.sourcePath, state: snapshot.item.state)
+                        self?.applyExportSnapshot(snapshot)
                     }
                 }
                 await MainActor.run {
-                    let summary = result.session
-                    self.importStatus = "Imported \(summary.importedCount), skipped \(summary.duplicateCount), failed \(summary.failedCount)."
-                    self.isImporting = false
-                    self.refreshImportHistory()
-                    self.refreshAlreadyImportedBadges()
-                    self.recordActivity(
-                        title: "Import Session #\(summary.id)",
-                        detail: "Imported \(summary.importedCount), skipped \(summary.duplicateCount), failed \(summary.failedCount).",
-                        sessionID: summary.id,
-                        isError: summary.failedCount > 0
-                    )
+                    self.isExporting = false
+                    self.exportStatus = "Exported \(summary.exportedCount), failed \(summary.failedCount), cancelled \(summary.cancelledCount)."
+                    self.postExportCompletionNotification(summary: summary)
                 }
+                await StructuredLogger.shared.log(
+                    event: "export_queue_completed",
+                    metadata: [
+                        "exported": "\(summary.exportedCount)",
+                        "failed": "\(summary.failedCount)",
+                        "cancelled": "\(summary.cancelledCount)"
+                    ]
+                )
             } catch {
                 await MainActor.run {
-                    self.importStatus = "Import failed: \(error.localizedDescription)"
-                    self.isImporting = false
-                    self.recordActivity(
-                        title: "Import Failed",
-                        detail: error.localizedDescription,
-                        sessionID: nil,
-                        isError: true
-                    )
+                    self.isExporting = false
+                    self.exportStatus = "Export failed: \(error.localizedDescription)"
                 }
-            }
-        }
-    }
-
-    func prepareLibraryIfNeeded() async {
-        do {
-            _ = try await libraryManager.bootstrapIfNeeded()
-            _ = try await importManager.resumeIncompleteImports { [weak self] snapshot in
-                Task { @MainActor in
-                    self?.setImportState(forSourcePath: snapshot.item.sourcePath, state: snapshot.item.state)
-                }
-            }
-            refreshImportHistory()
-        } catch {
-            importStatus = "Could not initialize library: \(error.localizedDescription)"
-        }
-    }
-
-    func refreshImportHistory() {
-        Task {
-            do {
-                let sessions = try await importManager.recentSessions(limit: 20)
-                await MainActor.run {
-                    self.recentImportSessions = sessions
-                    if self.selectedImportSessionID == nil {
-                        self.selectedImportSessionID = sessions.first?.id
-                    } else {
-                        self.loadSelectedSessionItems()
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    self.importStatus = "Could not load import history: \(error.localizedDescription)"
-                }
-            }
-        }
-    }
-
-    func stageAsset(withID id: PhotoAsset.ID) {
-        guard photoAssets.contains(where: { $0.id == id }) else { return }
-        if !stagedAssetIDs.contains(id) {
-            stagedAssetIDs.append(id)
-        }
-    }
-
-    func unstageAsset(withID id: PhotoAsset.ID) {
-        stagedAssetIDs.removeAll { $0 == id }
-    }
-
-    func clearManualStaging() {
-        stagedAssetIDs.removeAll()
-    }
-
-    var hasValidExportTarget: Bool {
-        let path = importOptions.exportBasePath.trimmingCharacters(in: .whitespacesAndNewlines)
-        let folder = importOptions.exportFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !path.isEmpty && !folder.isEmpty
-    }
-
-    func refreshAlreadyImportedBadges() {
-        guard let root = selectedVolume?.importRoot else { return }
-        let assets = photoAssets
-        Task {
-            let importedPaths = (try? await importManager.importedAssetSourcePaths(for: assets, sourceRoot: root)) ?? []
-            await MainActor.run {
-                self.alreadyImportedAssetIDs = Set(
-                    assets.filter { importedPaths.contains($0.url.path) }.map(\.id)
+                await StructuredLogger.shared.log(
+                    event: "export_queue_failed",
+                    metadata: [
+                        "error": error.localizedDescription
+                    ]
                 )
             }
         }
     }
 
-    func retryFailedImports(for sessionID: Int64) {
-        guard !isImporting else { return }
-        isImporting = true
-        importStatus = "Retrying failed items from session \(sessionID)..."
-        Task {
-            do {
-                let result = try await importManager.retryFailedItems(from: sessionID)
-                await MainActor.run {
-                    self.isImporting = false
-                    self.importStatus = "Retry complete: imported \(result.session.importedCount), duplicates \(result.session.duplicateCount), failed \(result.session.failedCount)."
-                    self.refreshImportHistory()
-                    self.refreshAlreadyImportedBadges()
-                    self.recordActivity(
-                        title: "Retry Session #\(result.session.id)",
-                        detail: "Imported \(result.session.importedCount), skipped \(result.session.duplicateCount), failed \(result.session.failedCount).",
-                        sessionID: result.session.id,
-                        isError: result.session.failedCount > 0
-                    )
-                }
-            } catch {
-                await MainActor.run {
-                    self.isImporting = false
-                    self.importStatus = "Retry failed: \(error.localizedDescription)"
-                    self.recordActivity(
-                        title: "Retry Failed",
-                        detail: error.localizedDescription,
-                        sessionID: sessionID,
-                        isError: true
-                    )
-                }
-            }
+    func cancelExportQueue() {
+        guard isExporting else { return }
+        Task { await exportManager.cancel() }
+        exportStatus = "Cancelling export queue..."
+    }
+
+    func retryFailedExports() {
+        var retried = 0
+        for index in exportQueue.indices where exportQueue[index].state == .failed {
+            exportQueue[index].state = .queued
+            exportQueue[index].errorMessage = nil
+            exportQueue[index].warningMessage = nil
+            exportQueue[index].destinationPath = nil
+            exportQueue[index].startedAt = nil
+            exportQueue[index].completedAt = nil
+            exportQueue[index].bytesWritten = nil
+            retried += 1
         }
+        exportStatus = retried > 0 ? "Re-queued \(retried) failed export(s)." : "No failed exports to retry."
+    }
+
+    func clearCompletedExports() {
+        exportQueue.removeAll { $0.state == .done || $0.state == .cancelled }
+    }
+
+    func removeExportItem(id: ExportQueueItem.ID) {
+        exportQueue.removeAll { $0.id == id }
+    }
+
+    func revealExportedItem(_ item: ExportQueueItem) {
+        guard let destinationPath = item.destinationPath else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: destinationPath)])
+    }
+
+    func useRecentExportDestination(_ path: String) {
+        setExportBasePath(path)
+    }
+
+    func addExportPreset(_ preset: ExportPreset) {
+        exportPresets.append(preset)
+        selectedExportPresetID = preset.id
+    }
+
+    func updateSelectedExportPreset(_ updated: ExportPreset) {
+        guard let index = exportPresets.firstIndex(where: { $0.id == updated.id }) else { return }
+        exportPresets[index] = updated
+    }
+
+    func deleteSelectedExportPreset() {
+        guard let selectedExportPresetID, exportPresets.count > 1 else { return }
+        exportPresets.removeAll { $0.id == selectedExportPresetID }
+        self.selectedExportPresetID = exportPresets.first?.id
     }
 
     func selectNextAsset() {
@@ -327,7 +436,69 @@ final class BrowserViewModel: ObservableObject {
         guard let selectedAssetID else { return }
         tags[selectedAssetID] = nil
         clearFinderColorTags(for: selectedAssetID)
+        removePendingQueueEntry(for: selectedAssetID)
         ensureSelectedAssetVisible()
+    }
+
+    func setSelectedRating(_ value: Int) {
+        guard let selectedAssetID else { return }
+        setRating(value, for: selectedAssetID)
+    }
+
+    func clearSelectedRating() {
+        guard let selectedAssetID else { return }
+        ratings[selectedAssetID] = nil
+        persistRatingsForVisibleAssets()
+    }
+
+    func isTagHotkey(_ characters: String?) -> Bool {
+        guard let key = characters?.lowercased() else { return false }
+        switch shortcutProfile {
+        case .classicZXC:
+            return key == "z" || key == "x" || key == "c" || key == "r"
+        case .numeric120:
+            return key == "1" || key == "2" || key == "0" || key == "r"
+        }
+    }
+
+    func handleTagHotkey(_ characters: String?) -> Bool {
+        guard let key = characters?.lowercased() else { return false }
+        switch shortcutProfile {
+        case .classicZXC:
+            switch key {
+            case "z":
+                tagSelectedAsKeep()
+                return true
+            case "x":
+                tagSelectedAsReject()
+                return true
+            case "c":
+                clearSelectedTag()
+                return true
+            case "r":
+                cycleSelectedRating()
+                return true
+            default:
+                return false
+            }
+        case .numeric120:
+            switch key {
+            case "1":
+                tagSelectedAsKeep()
+                return true
+            case "2":
+                tagSelectedAsReject()
+                return true
+            case "0":
+                clearSelectedTag()
+                return true
+            case "r":
+                cycleSelectedRating()
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     private func bindVolumeUpdates() {
@@ -338,91 +509,272 @@ final class BrowserViewModel: ObservableObject {
                 self.volumes = newVolumes
                 if let currentlySelected = self.selectedVolume,
                    !newVolumes.contains(currentlySelected) {
-                    self.selectedVolume = newVolumes.first { $0.isLikelyCameraCard } ?? newVolumes.first
+                    self.selectedVolume = newVolumes.first { $0.isLikelyCameraCard } ?? self.libraryVolume ?? newVolumes.first
                 } else if self.selectedVolume == nil {
-                    self.selectedVolume = newVolumes.first { $0.isLikelyCameraCard } ?? newVolumes.first
+                    self.selectedVolume = newVolumes.first { $0.isLikelyCameraCard } ?? self.libraryVolume ?? newVolumes.first
                 }
             }
             .store(in: &cancellables)
     }
 
+    private func installShortcutObserver() {
+        shortcutObserver = DistributedNotificationCenter.default().addObserver(
+            forName: .darkroomShortcutExportRequested,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.handleShortcutExportRequest()
+            }
+        }
+    }
+
+    private func installPreferenceObserver() {
+        preferenceObserver = NotificationCenter.default.addObserver(
+            forName: .darkroomPreferencesChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.applyRuntimePreferences()
+            }
+        }
+    }
+
+    private func installMemoryPressureHandler() {
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            Task {
+                await ThumbnailCache.shared.clear()
+                await FullImageLoader.shared.clear()
+                await EditedThumbnailCache.shared.clear()
+                await StructuredLogger.shared.log(
+                    event: "memory_pressure_cache_clear",
+                    metadata: ["state": "\(source.data.rawValue)"]
+                )
+                await MainActor.run {
+                    self.exportStatus = "Cache cleared due to memory pressure."
+                }
+            }
+        }
+        source.resume()
+        memoryPressureSource = source
+    }
+
+    private func handleShortcutExportRequest() {
+        guard let payload = UserDefaults.standard.dictionary(forKey: darkroomShortcutExportRequestDefaultsKey) else {
+            return
+        }
+        if let presetName = payload["presetName"] as? String,
+           let preset = exportPresets.first(where: { $0.name.caseInsensitiveCompare(presetName) == .orderedSame }) {
+            selectedExportPresetID = preset.id
+        }
+        if let destinationPath = payload["destinationPath"] as? String {
+            setExportBasePath(destinationPath)
+        }
+        if let shootName = payload["shootName"] as? String {
+            exportDestination.shootName = shootName
+        }
+        if let selectedAsset {
+            enqueueForExport(assets: [selectedAsset], statusPrefix: "Queued")
+        } else {
+            enqueueGreenTaggedForExport()
+        }
+        startExportQueue()
+    }
+
     private func loadAssetsForSelection() {
-        guard let volume = selectedVolume, let root = volume.importRoot else {
+        guard let volume = selectedVolume, let root = volume.browsingRoot else {
             photoAssets = []
             selectedAssetID = nil
             tags = [:]
-            importItemStates = [:]
-            alreadyImportedAssetIDs = []
-            stagedAssetIDs = []
+            ratings = [:]
             return
         }
+
         isLoadingAssets = true
-        importStatus = nil
         Task {
             let assets = await enumerator.assets(at: root)
             let loadedTags = await finderTagManager.tagMap(for: assets)
-            let importedPaths = (try? await importManager.importedAssetSourcePaths(for: assets, sourceRoot: root)) ?? []
+            let loadedRatings = self.loadRatings(for: assets)
             await MainActor.run {
                 self.photoAssets = assets
                 self.tags = loadedTags
-                self.importItemStates = [:]
-                self.alreadyImportedAssetIDs = Set(
-                    assets.filter { importedPaths.contains($0.url.path) }.map(\.id)
-                )
-                self.stagedAssetIDs = []
+                self.ratings = loadedRatings
                 self.ensureSelectedAssetVisible(defaultToFirst: true)
                 self.isLoadingAssets = false
+                self.syncQueueWithGreenTags()
             }
         }
     }
 
-    private func loadSelectedSessionItems() {
-        guard let selectedImportSessionID else {
-            selectedSessionItems = []
+    private func syncQueueWithGreenTags() {
+        let greenIDs = Set(photoAssets.compactMap { tags[$0.id] == .keep ? $0.id : nil })
+        exportQueue.removeAll { item in
+            guard item.state == .queued else { return false }
+            return photoAssets.contains(where: { $0.id == item.asset.id }) && !greenIDs.contains(item.asset.id)
+        }
+        for asset in photoAssets where tags[asset.id] == .keep {
+            ensureQueuedForExport(asset)
+        }
+    }
+
+    private func enqueueForExport(assets: [PhotoAsset], statusPrefix: String) {
+        guard !assets.isEmpty else {
+            exportStatus = "No photos available to queue."
             return
         }
-        Task {
-            do {
-                let items = try await importManager.sessionItems(sessionID: selectedImportSessionID)
-                await MainActor.run {
-                    self.selectedSessionItems = items
-                }
-            } catch {
-                await MainActor.run {
-                    self.importStatus = "Could not load session items: \(error.localizedDescription)"
-                }
+        var appended = 0
+        for asset in assets {
+            if ensureQueuedForExport(asset) {
+                appended += 1
             }
         }
-    }
-
-    private func setImportState(forSourcePath sourcePath: String, state: ImportItemState) {
-        guard let matchingAsset = photoAssets.first(where: { $0.url.path == sourcePath }) else {
-            return
+        if appended == 0 {
+            exportStatus = "Selected photos are already queued."
+        } else {
+            exportStatus = "\(statusPrefix) \(appended) photo(s) for export."
         }
-        importItemStates[matchingAsset.id] = state
     }
 
-    private func recordActivity(title: String, detail: String, sessionID: Int64?, isError: Bool) {
-        activityEntries.insert(
-            ImportActivityEntry(
+    @discardableResult
+    private func ensureQueuedForExport(_ asset: PhotoAsset) -> Bool {
+        if exportQueue.contains(where: { $0.asset.id == asset.id && !$0.state.isTerminal }) {
+            return false
+        }
+        exportQueue.append(
+            ExportQueueItem(
                 id: UUID(),
-                createdAt: Date(),
-                title: title,
-                detail: detail,
-                sessionID: sessionID,
-                isError: isError
-            ),
-            at: 0
+                asset: asset,
+                state: .queued,
+                destinationPath: nil,
+                errorMessage: nil,
+                warningMessage: nil,
+                startedAt: nil,
+                completedAt: nil,
+                bytesWritten: nil
+            )
         )
-        if activityEntries.count > 200 {
-            activityEntries.removeLast(activityEntries.count - 200)
+        return true
+    }
+
+    private func removePendingQueueEntry(for assetID: PhotoAsset.ID) {
+        exportQueue.removeAll { $0.asset.id == assetID && $0.state == .queued }
+    }
+
+    private func applyExportSnapshot(_ snapshot: ExportProgressSnapshot) {
+        guard let index = exportQueue.firstIndex(where: { $0.asset.url.path == snapshot.sourcePath }) else {
+            return
         }
+        if exportQueue[index].startedAt == nil && (snapshot.state == .rendering || snapshot.state == .writing) {
+            exportQueue[index].startedAt = Date()
+        }
+        exportQueue[index].state = snapshot.state
+        exportQueue[index].destinationPath = snapshot.destinationPath ?? exportQueue[index].destinationPath
+        exportQueue[index].errorMessage = snapshot.errorMessage
+        exportQueue[index].warningMessage = snapshot.warningMessage
+        exportQueue[index].bytesWritten = snapshot.bytesWritten ?? exportQueue[index].bytesWritten
+        if snapshot.state.isTerminal {
+            exportQueue[index].completedAt = Date()
+        }
+    }
+
+    private func persistExportPresets() {
+        let encoder = JSONEncoder()
+        guard let data = try? encoder.encode(exportPresets) else { return }
+        UserDefaults.standard.set(data, forKey: Self.exportPresetsDefaultsKey)
+    }
+
+    private static func loadPersistedExportPresets() -> [ExportPreset]? {
+        guard let data = UserDefaults.standard.data(forKey: exportPresetsDefaultsKey) else {
+            return nil
+        }
+        let decoder = JSONDecoder()
+        return try? decoder.decode([ExportPreset].self, from: data)
+    }
+
+    private static func persistExportQueue(_ queue: [ExportQueueItem]) {
+        let encoder = JSONEncoder()
+        guard let data = try? encoder.encode(queue.map { ExportQueueRecord(item: $0) }) else { return }
+        let url = exportQueueCacheURL()
+        let parent = url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        try? data.write(to: url, options: [.atomic])
+    }
+
+    private static func loadPersistedExportQueue() -> [ExportQueueItem] {
+        let url = exportQueueCacheURL()
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        let decoder = JSONDecoder()
+        guard let records = try? decoder.decode([ExportQueueRecord].self, from: data) else { return [] }
+        return records.map(\.asQueueItem)
+    }
+
+    private static func exportQueueCacheURL() -> URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appending(path: "Library/Application Support", directoryHint: .isDirectory)
+        return appSupport
+            .appending(path: "Darkroom", directoryHint: .isDirectory)
+            .appending(path: exportQueueCacheFilename, directoryHint: .notDirectory)
+    }
+
+    private func loadRecentDestinations(for presetID: ExportPreset.ID?) -> [String] {
+        guard let presetID else { return [] }
+        guard let raw = UserDefaults.standard.dictionary(forKey: Self.exportRecentDestinationsDefaultsKey) as? [String: [String]] else {
+            return []
+        }
+        return raw[presetID.uuidString] ?? []
+    }
+
+    private func rememberRecentDestination(_ path: String, for presetID: ExportPreset.ID) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var raw = UserDefaults.standard.dictionary(forKey: Self.exportRecentDestinationsDefaultsKey) as? [String: [String]] ?? [:]
+        var paths = raw[presetID.uuidString] ?? []
+        paths.removeAll { $0 == trimmed }
+        paths.insert(trimmed, at: 0)
+        if paths.count > 5 {
+            paths.removeLast(paths.count - 5)
+        }
+        raw[presetID.uuidString] = paths
+        UserDefaults.standard.set(raw, forKey: Self.exportRecentDestinationsDefaultsKey)
+        if selectedExportPresetID == presetID {
+            recentExportDestinations = paths
+        }
+    }
+
+    private func requestNotificationPermissionIfNeeded() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    private func postExportCompletionNotification(summary: ExportRunSummary) {
+        let content = UNMutableNotificationContent()
+        content.title = "Export Queue Complete"
+        content.body = "Exported \(summary.exportedCount), failed \(summary.failedCount), cancelled \(summary.cancelledCount)."
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    private func resumePendingExportsIfNeeded() {
+        guard !isExporting else { return }
+        guard exportQueue.contains(where: { $0.state == .queued }) else { return }
+        exportStatus = "Recovered pending exports after relaunch."
+        startExportQueue()
     }
 
     private func setSelectedTag(_ tag: PhotoTag) {
-        guard let selectedAssetID else { return }
+        guard let selectedAssetID,
+              let selectedAsset = photoAssets.first(where: { $0.id == selectedAssetID }) else {
+            return
+        }
         tags[selectedAssetID] = tag
         applyFinderTag(tag, to: selectedAssetID)
+        if tag == .keep {
+            _ = ensureQueuedForExport(selectedAsset)
+        } else {
+            removePendingQueueEntry(for: selectedAssetID)
+        }
         ensureSelectedAssetVisible()
     }
 
@@ -436,7 +788,7 @@ final class BrowserViewModel: ObservableObject {
                 try await finderTagManager.applyTag(for: tag, to: selectedAsset.url)
             } catch {
                 await MainActor.run {
-                    self.importStatus = "Could not set Finder tag for \(selectedAsset.filename)."
+                    self.exportStatus = "Could not set Finder tag for \(selectedAsset.filename)."
                 }
             }
         }
@@ -452,7 +804,7 @@ final class BrowserViewModel: ObservableObject {
                 try await finderTagManager.clearColorTags(for: selectedAsset.url)
             } catch {
                 await MainActor.run {
-                    self.importStatus = "Could not clear Finder tags for \(selectedAsset.filename)."
+                    self.exportStatus = "Could not clear Finder tags for \(selectedAsset.filename)."
                 }
             }
         }
@@ -492,4 +844,100 @@ final class BrowserViewModel: ObservableObject {
             selectedAssetID = visible.first?.id
         }
     }
+
+    private func cycleSelectedRating() {
+        guard let selectedAssetID else { return }
+        let current = ratings[selectedAssetID] ?? 0
+        let next = current >= 5 ? 0 : current + 1
+        setRating(next, for: selectedAssetID)
+    }
+
+    private func setRating(_ value: Int, for assetID: PhotoAsset.ID) {
+        let clamped = min(max(value, 0), 5)
+        if clamped == 0 {
+            ratings[assetID] = nil
+        } else {
+            ratings[assetID] = clamped
+        }
+        persistRatingsForVisibleAssets()
+    }
+
+    private func loadRatings(for assets: [PhotoAsset]) -> [PhotoAsset.ID: Int] {
+        guard let raw = UserDefaults.standard.dictionary(forKey: Self.ratingsDefaultsKey) as? [String: Int] else {
+            return [:]
+        }
+        var mapped: [PhotoAsset.ID: Int] = [:]
+        for asset in assets {
+            if let value = raw[asset.url.path], value > 0 {
+                mapped[asset.id] = min(max(value, 1), 5)
+            }
+        }
+        return mapped
+    }
+
+    private func persistRatingsForVisibleAssets() {
+        var raw = UserDefaults.standard.dictionary(forKey: Self.ratingsDefaultsKey) as? [String: Int] ?? [:]
+        for asset in photoAssets {
+            let rating = ratings[asset.id] ?? 0
+            if rating > 0 {
+                raw[asset.url.path] = rating
+            } else {
+                raw.removeValue(forKey: asset.url.path)
+            }
+        }
+        UserDefaults.standard.set(raw, forKey: Self.ratingsDefaultsKey)
+    }
+}
+
+private struct ExportQueueRecord: Codable {
+    let id: UUID
+    let sourcePath: String
+    let filename: String
+    let captureDate: Date?
+    let fileSize: Int64?
+    let state: ExportItemState
+    let destinationPath: String?
+    let errorMessage: String?
+    let warningMessage: String?
+    let startedAt: Date?
+    let completedAt: Date?
+    let bytesWritten: Int64?
+
+    init(item: ExportQueueItem) {
+        self.id = item.id
+        self.sourcePath = item.asset.url.path
+        self.filename = item.asset.filename
+        self.captureDate = item.asset.captureDate
+        self.fileSize = item.asset.fileSize
+        self.state = item.state
+        self.destinationPath = item.destinationPath
+        self.errorMessage = item.errorMessage
+        self.warningMessage = item.warningMessage
+        self.startedAt = item.startedAt
+        self.completedAt = item.completedAt
+        self.bytesWritten = item.bytesWritten
+    }
+
+    var asQueueItem: ExportQueueItem {
+        ExportQueueItem(
+            id: id,
+            asset: PhotoAsset(
+                url: URL(fileURLWithPath: sourcePath),
+                filename: filename,
+                captureDate: captureDate,
+                fileSize: fileSize
+            ),
+            state: state,
+            destinationPath: destinationPath,
+            errorMessage: errorMessage,
+            warningMessage: warningMessage,
+            startedAt: startedAt,
+            completedAt: completedAt,
+            bytesWritten: bytesWritten
+        )
+    }
+}
+
+extension Notification.Name {
+    static let darkroomShortcutExportRequested = Notification.Name("darkroom.shortcut.export.requested")
 }

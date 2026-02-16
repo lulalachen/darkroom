@@ -30,7 +30,7 @@ struct Volume: Identifiable, Hashable {
         isRemovable && url.path.hasPrefix("/Volumes/")
     }
 
-    var importRoot: URL? {
+    var browsingRoot: URL? {
         let dcim = url.appending(path: "DCIM", directoryHint: .isDirectory)
         if FileManager.default.fileExists(atPath: dcim.path, isDirectory: nil) {
             return dcim

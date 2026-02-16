@@ -41,8 +41,15 @@ if [[ -d "${RESOURCE_BUNDLE_PATH}" ]]; then
   cp -R "${RESOURCE_BUNDLE_PATH}" "${APP_DIR}/darkroom_darkroom.bundle"
 fi
 
+ICON_PNG_SOURCE=""
 if [[ -f "${PROJECT_ROOT}/Sources/Resources/AppIcon.png" ]]; then
-  cp "${PROJECT_ROOT}/Sources/Resources/AppIcon.png" "${RESOURCES_DIR}/AppIcon.png"
+  ICON_PNG_SOURCE="${PROJECT_ROOT}/Sources/Resources/AppIcon.png"
+elif [[ -f "${PROJECT_ROOT}/Sources/Resources/AppIcon.icon/Assets/darkroom_appicon_1024_opaque.png" ]]; then
+  ICON_PNG_SOURCE="${PROJECT_ROOT}/Sources/Resources/AppIcon.icon/Assets/darkroom_appicon_1024_opaque.png"
+fi
+
+if [[ -n "${ICON_PNG_SOURCE}" ]]; then
+  cp "${ICON_PNG_SOURCE}" "${RESOURCES_DIR}/AppIcon.png"
 fi
 
 cat > "${CONTENTS_DIR}/Info.plist" <<EOF
@@ -60,6 +67,8 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
   <string>${APP_NAME}</string>
   <key>CFBundleDisplayName</key>
   <string>${APP_NAME}</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon.png</string>
   <key>CFBundleShortVersionString</key>
   <string>${APP_VERSION}</string>
   <key>CFBundleVersion</key>

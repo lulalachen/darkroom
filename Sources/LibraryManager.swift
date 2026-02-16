@@ -5,7 +5,6 @@ struct LibraryPaths {
     let originalsRoot: URL
     let previewsRoot: URL
     let manifestsRoot: URL
-    let importDatabaseURL: URL
 }
 
 struct LibraryManifest: Codable {
@@ -32,17 +31,21 @@ actor LibraryManager {
     }
 
     private func defaultPaths() -> LibraryPaths {
-        let picturesDirectory = fileManager.urls(for: .picturesDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appending(path: "Pictures", directoryHint: .isDirectory)
-        let root = picturesDirectory.appending(path: "DarkroomLibrary.darkroom", directoryHint: .isDirectory)
+        let configuredBase = UserDefaults.standard.string(forKey: darkroomPrefDefaultLibraryPathKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseDirectory: URL
+        if let configuredBase, !configuredBase.isEmpty {
+            baseDirectory = URL(fileURLWithPath: configuredBase, isDirectory: true)
+        } else {
+            baseDirectory = fileManager.urls(for: .picturesDirectory, in: .userDomainMask).first
+                ?? URL(fileURLWithPath: NSHomeDirectory()).appending(path: "Pictures", directoryHint: .isDirectory)
+        }
+        let root = baseDirectory.appending(path: "DarkroomLibrary.darkroom", directoryHint: .isDirectory)
         return LibraryPaths(
             root: root,
             originalsRoot: root.appending(path: "Originals", directoryHint: .isDirectory),
             previewsRoot: root.appending(path: "Previews", directoryHint: .isDirectory),
-            manifestsRoot: root.appending(path: "Manifests", directoryHint: .isDirectory),
-            importDatabaseURL: root
-                .appending(path: "Manifests", directoryHint: .isDirectory)
-                .appending(path: "imports.sqlite3", directoryHint: .notDirectory)
+            manifestsRoot: root.appending(path: "Manifests", directoryHint: .isDirectory)
         )
     }
 

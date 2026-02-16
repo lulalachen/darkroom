@@ -32,7 +32,7 @@ actor PreviewGenerator {
                 if let representation {
                     continuation.resume(returning: representation)
                 } else {
-                    continuation.resume(throwing: error ?? ImportFailure(message: "Thumbnail generation failed."))
+                    continuation.resume(throwing: error ?? ExportFailure(message: "Thumbnail generation failed."))
                 }
             }
         }
@@ -51,4 +51,3 @@ actor PreviewGenerator {
         return CGImageDestinationFinalize(destination)
     }
 }
-
