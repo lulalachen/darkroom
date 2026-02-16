@@ -16,7 +16,7 @@ final class BrowserViewModel: ObservableObject {
             case .all:
                 return "All"
             case .keep:
-                return "Gray"
+                return "Green"
             case .reject:
                 return "Red"
             case .untagged:
@@ -43,6 +43,16 @@ final class BrowserViewModel: ObservableObject {
     @Published var isLoadingAssets: Bool = false
     @Published private(set) var isImporting: Bool = false
     @Published private(set) var importStatus: String?
+    @Published private(set) var gridColumnCount: Int = 1
+    @Published private(set) var importItemStates: [PhotoAsset.ID: ImportItemState] = [:]
+    @Published private(set) var recentImportSessions: [ImportSessionSummary] = []
+    @Published private(set) var selectedSessionItems: [ImportQueueItem] = []
+    @Published var selectedImportSessionID: Int64? {
+        didSet {
+            guard selectedImportSessionID != oldValue else { return }
+            loadSelectedSessionItems()
+        }
+    }
 
     var filteredVolumes: [Volume] {
         volumes.filter { $0.isRemovable }
@@ -50,7 +60,8 @@ final class BrowserViewModel: ObservableObject {
 
     private let volumeWatcher: VolumeWatcher
     private let enumerator = PhotoEnumerator()
-    private let importManager = ImportManager()
+    private let libraryManager: LibraryManager
+    private let importManager: ImportManager
     private let finderTagManager = FinderTagManager()
     private var cancellables: Set<AnyCancellable> = []
 
@@ -80,9 +91,11 @@ final class BrowserViewModel: ObservableObject {
         }
     }
 
-    init(volumeWatcher: VolumeWatcher? = nil, mockVolumes: [Volume]? = nil) {
+    init(volumeWatcher: VolumeWatcher? = nil, libraryManager: LibraryManager = .shared, mockVolumes: [Volume]? = nil) {
         let watcher = volumeWatcher ?? VolumeWatcher()
         self.volumeWatcher = watcher
+        self.libraryManager = libraryManager
+        self.importManager = ImportManager(libraryManager: libraryManager)
         if let mockVolumes {
             self.volumes = mockVolumes
             self.selectedVolume = mockVolumes.first
@@ -115,8 +128,9 @@ final class BrowserViewModel: ObservableObject {
     func importMarkedPhotos() {
         guard !isImporting else { return }
         let marked = photoAssets.filter { tags[$0.id] == .keep }
+        let currentVolume = selectedVolume
         guard !marked.isEmpty else {
-            importStatus = "No photos tagged Gray yet."
+            importStatus = "No photos tagged Green yet."
             return
         }
 
@@ -125,15 +139,55 @@ final class BrowserViewModel: ObservableObject {
 
         Task {
             do {
-                let result = try await importManager.importAssets(marked)
+                let result = try await importManager.importAssets(marked, sourceVolume: currentVolume) { [weak self] snapshot in
+                    Task { @MainActor in
+                        self?.setImportState(forSourcePath: snapshot.item.sourcePath, state: snapshot.item.state)
+                    }
+                }
                 await MainActor.run {
-                    self.importStatus = "Imported \(result.copiedCount) photo(s) to \(result.destination.path)."
+                    let summary = result.session
+                    self.importStatus = "Imported \(summary.importedCount), skipped \(summary.duplicateCount), failed \(summary.failedCount)."
                     self.isImporting = false
+                    self.refreshImportHistory()
                 }
             } catch {
                 await MainActor.run {
                     self.importStatus = "Import failed: \(error.localizedDescription)"
                     self.isImporting = false
+                }
+            }
+        }
+    }
+
+    func prepareLibraryIfNeeded() async {
+        do {
+            _ = try await libraryManager.bootstrapIfNeeded()
+            _ = try await importManager.resumeIncompleteImports { [weak self] snapshot in
+                Task { @MainActor in
+                    self?.setImportState(forSourcePath: snapshot.item.sourcePath, state: snapshot.item.state)
+                }
+            }
+            refreshImportHistory()
+        } catch {
+            importStatus = "Could not initialize library: \(error.localizedDescription)"
+        }
+    }
+
+    func refreshImportHistory() {
+        Task {
+            do {
+                let sessions = try await importManager.recentSessions(limit: 20)
+                await MainActor.run {
+                    self.recentImportSessions = sessions
+                    if self.selectedImportSessionID == nil {
+                        self.selectedImportSessionID = sessions.first?.id
+                    } else {
+                        self.loadSelectedSessionItems()
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.importStatus = "Could not load import history: \(error.localizedDescription)"
                 }
             }
         }
@@ -145,6 +199,26 @@ final class BrowserViewModel: ObservableObject {
 
     func selectPreviousAsset() {
         moveSelection(by: -1)
+    }
+
+    func selectLeftAsset() {
+        moveSelection(by: -1)
+    }
+
+    func selectRightAsset() {
+        moveSelection(by: 1)
+    }
+
+    func selectUpAsset() {
+        moveSelection(by: -gridColumnCount)
+    }
+
+    func selectDownAsset() {
+        moveSelection(by: gridColumnCount)
+    }
+
+    func setGridColumnCount(_ count: Int) {
+        gridColumnCount = max(1, count)
     }
 
     func clearSelectedTag() {
@@ -175,6 +249,7 @@ final class BrowserViewModel: ObservableObject {
             photoAssets = []
             selectedAssetID = nil
             tags = [:]
+            importItemStates = [:]
             return
         }
         isLoadingAssets = true
@@ -185,10 +260,37 @@ final class BrowserViewModel: ObservableObject {
             await MainActor.run {
                 self.photoAssets = assets
                 self.tags = loadedTags
+                self.importItemStates = [:]
                 self.ensureSelectedAssetVisible(defaultToFirst: true)
                 self.isLoadingAssets = false
             }
         }
+    }
+
+    private func loadSelectedSessionItems() {
+        guard let selectedImportSessionID else {
+            selectedSessionItems = []
+            return
+        }
+        Task {
+            do {
+                let items = try await importManager.sessionItems(sessionID: selectedImportSessionID)
+                await MainActor.run {
+                    self.selectedSessionItems = items
+                }
+            } catch {
+                await MainActor.run {
+                    self.importStatus = "Could not load session items: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func setImportState(forSourcePath sourcePath: String, state: ImportItemState) {
+        guard let matchingAsset = photoAssets.first(where: { $0.url.path == sourcePath }) else {
+            return
+        }
+        importItemStates[matchingAsset.id] = state
     }
 
     private func setSelectedTag(_ tag: PhotoTag) {

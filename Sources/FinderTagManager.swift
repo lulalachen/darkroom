@@ -1,6 +1,7 @@
 import Foundation
 
 actor FinderTagManager {
+    private let greenTagName = "Green"
     private let grayTagName = "Gray"
     private let redTagName = "Red"
     private let colorTagNames: Set<String> = ["Gray", "Green", "Purple", "Blue", "Yellow", "Red", "Orange"]
@@ -49,6 +50,9 @@ actor FinderTagManager {
         }
 
         let tagNames = values.tagNames ?? []
+        if tagNames.contains(where: { $0.caseInsensitiveCompare(greenTagName) == .orderedSame }) {
+            return .keep
+        }
         if tagNames.contains(where: { $0.caseInsensitiveCompare(grayTagName) == .orderedSame }) {
             return .keep
         }
@@ -61,7 +65,7 @@ actor FinderTagManager {
     private func finderTagName(for appTag: PhotoTag) -> String {
         switch appTag {
         case .keep:
-            return grayTagName
+            return greenTagName
         case .reject:
             return redTagName
         }

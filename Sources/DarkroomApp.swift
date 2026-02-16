@@ -16,6 +16,9 @@ struct DarkroomApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(viewModel)
+                .task {
+                    await viewModel.prepareLibraryIfNeeded()
+                }
         }
         .defaultSize(width: 1200, height: 720)
     }

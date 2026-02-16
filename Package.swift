@@ -20,7 +20,15 @@ let package = Package(
             path: "Sources",
             resources: [
                 .copy("Resources/AppIcon.png")
+            ],
+            linkerSettings: [
+                .linkedLibrary("sqlite3")
             ]
         ),
+        .testTarget(
+            name: "darkroomTests",
+            dependencies: ["darkroom"],
+            path: "Tests"
+        )
     ]
 )

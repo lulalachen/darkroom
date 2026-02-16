@@ -63,6 +63,7 @@ struct VolumeRow: View {
 struct BrowserDetailView: View {
     @ObservedObject var viewModel: BrowserViewModel
     @State private var keyMonitor: Any?
+    @State private var showsImportHistory = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -104,7 +105,7 @@ struct BrowserDetailView: View {
                 .pickerStyle(.segmented)
                 .frame(width: 280)
 
-                Button("Gray (Z)") {
+                Button("Green (Z)") {
                     viewModel.tagSelectedAsKeep()
                 }
                 .keyboardShortcut("z", modifiers: [])
@@ -126,10 +127,15 @@ struct BrowserDetailView: View {
                         ProgressView()
                             .controlSize(.small)
                     } else {
-                        Label("Import Gray (\(viewModel.keepCount))", systemImage: "square.and.arrow.down")
+                        Label("Import Green (\(viewModel.keepCount))", systemImage: "square.and.arrow.down")
                     }
                 }
                 .disabled(viewModel.keepCount == 0 || viewModel.isImporting)
+
+                Button("History") {
+                    viewModel.refreshImportHistory()
+                    showsImportHistory = true
+                }
             }
 
             if let volume = viewModel.selectedVolume {
@@ -139,6 +145,9 @@ struct BrowserDetailView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+        }
+        .sheet(isPresented: $showsImportHistory) {
+            ImportHistorySheet(viewModel: viewModel)
         }
     }
 
@@ -150,11 +159,17 @@ struct BrowserDetailView: View {
         }
 
         switch event.keyCode {
-        case 123, 126:
-            viewModel.selectPreviousAsset()
+        case 123:
+            viewModel.selectLeftAsset()
             return true
-        case 124, 125:
-            viewModel.selectNextAsset()
+        case 124:
+            viewModel.selectRightAsset()
+            return true
+        case 126:
+            viewModel.selectUpAsset()
+            return true
+        case 125:
+            viewModel.selectDownAsset()
             return true
         case 6:
             viewModel.tagSelectedAsKeep()
@@ -234,17 +249,20 @@ struct EmptyStateView: View {
 
 struct PhotoGridPane: View {
     @ObservedObject var viewModel: BrowserViewModel
+    private let spacing: CGFloat = 10
+    private let horizontalPadding: CGFloat = 24
 
     var body: some View {
         GeometryReader { geometry in
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVGrid(columns: columns(for: geometry.size.width), spacing: 10) {
+                    LazyVGrid(columns: columns(for: geometry.size.width), spacing: spacing) {
                         ForEach(viewModel.visiblePhotoAssets) { asset in
                             ThumbnailCell(
                                 asset: asset,
                                 isSelected: asset.id == viewModel.selectedAssetID,
-                                tag: viewModel.tag(for: asset)
+                                tag: viewModel.tag(for: asset),
+                                importState: viewModel.importItemStates[asset.id]
                             )
                             .id(asset.id)
                             .onTapGesture {
@@ -255,10 +273,14 @@ struct PhotoGridPane: View {
                     .padding(12)
                 }
                 .onAppear {
+                    updateGridConfig(for: geometry.size.width)
                     scrollToSelection(with: proxy)
                 }
                 .onChange(of: viewModel.selectedAssetID) { _ in
                     scrollToSelection(with: proxy)
+                }
+                .onChange(of: geometry.size.width) { newWidth in
+                    updateGridConfig(for: newWidth)
                 }
             }
         }
@@ -266,7 +288,7 @@ struct PhotoGridPane: View {
 
     private func columns(for width: CGFloat) -> [GridItem] {
         let minimumCellWidth = max(120, min(180, width / 2.6))
-        return [GridItem(.adaptive(minimum: minimumCellWidth), spacing: 10)]
+        return [GridItem(.adaptive(minimum: minimumCellWidth), spacing: spacing)]
     }
 
     private func scrollToSelection(with proxy: ScrollViewProxy) {
@@ -274,6 +296,13 @@ struct PhotoGridPane: View {
         withAnimation(.easeInOut(duration: 0.15)) {
             proxy.scrollTo(selectedID, anchor: .center)
         }
+    }
+
+    private func updateGridConfig(for width: CGFloat) {
+        let minimumCellWidth = max(120, min(180, width / 2.6))
+        let availableWidth = max(0, width - horizontalPadding)
+        let count = Int((availableWidth + spacing) / (minimumCellWidth + spacing))
+        viewModel.setGridColumnCount(max(1, count))
     }
 }
 
@@ -308,12 +337,12 @@ struct PreviewPane: View {
                     TagChip(tag: viewModel.tag(for: asset))
                 }
 
-                Text("Shortcuts: Z = Gray, X = Red, C = Clear")
+                Text("Shortcuts: Z = Green, X = Red, C = Clear")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
                 HStack(spacing: 8) {
-                    Button("Gray (Z)") {
+                    Button("Green (Z)") {
                         viewModel.tagSelectedAsKeep()
                     }
                     .keyboardShortcut("z", modifiers: [])
@@ -352,8 +381,11 @@ struct ImportStatusBar: View {
         HStack(spacing: 12) {
             Text("Total: \(viewModel.photoAssets.count)")
             Text("Visible: \(viewModel.visiblePhotoAssets.count)")
-            Text("Gray: \(viewModel.keepCount)")
+            Text("Green: \(viewModel.keepCount)")
             Text("Red: \(viewModel.rejectCount)")
+            if viewModel.isImporting {
+                Text("Importing...")
+            }
             Spacer()
             if let importStatus = viewModel.importStatus {
                 Text(importStatus)
@@ -374,11 +406,11 @@ struct TagChip: View {
     var body: some View {
         switch tag {
         case .keep:
-            Label("Gray", systemImage: PhotoTag.keep.symbolName)
+            Label("Green", systemImage: PhotoTag.keep.symbolName)
                 .font(.caption)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(.gray.opacity(0.2), in: Capsule())
+                .background(.green.opacity(0.2), in: Capsule())
         case .reject:
             Label("Red", systemImage: PhotoTag.reject.symbolName)
                 .font(.caption)
@@ -399,6 +431,7 @@ struct ThumbnailCell: View {
     let asset: PhotoAsset
     let isSelected: Bool
     let tag: PhotoTag?
+    let importState: ImportItemState?
 
     @State private var image: NSImage?
 
@@ -431,18 +464,125 @@ struct ThumbnailCell: View {
             if let tag {
                 Image(systemName: tag.symbolName)
                     .font(.title3)
-                    .foregroundStyle(tag == .keep ? .gray : .red)
+                    .foregroundStyle(tag == .keep ? .green : .red)
                     .padding(8)
             }
+
+            if let importState {
+                Text(importStateLabel(importState))
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(.black.opacity(0.55), in: Capsule())
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
         }
+        .saturation(tag == .reject ? 0 : 1)
+        .brightness(tag == .reject ? -0.15 : 0)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 3)
+                .stroke(isSelected ? .green : .clear, lineWidth: 3)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
         .task(id: asset.id) {
             image = await ThumbnailCache.shared.thumbnail(for: asset.url, size: CGSize(width: 320, height: 320))
+        }
+    }
+
+    private func importStateLabel(_ state: ImportItemState) -> String {
+        switch state {
+        case .queued: return "Queued"
+        case .hashing: return "Hashing"
+        case .copying: return "Copying"
+        case .verifying: return "Verifying"
+        case .done: return "Done"
+        case .skippedDuplicate: return "Duplicate"
+        case .failed: return "Failed"
+        }
+    }
+}
+
+struct ImportHistorySheet: View {
+    @ObservedObject var viewModel: BrowserViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationSplitView {
+            List(selection: $viewModel.selectedImportSessionID) {
+                ForEach(viewModel.recentImportSessions) { session in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(session.sourceVolumeName)
+                            .font(.headline)
+                        Text(session.startedAt.formatted(date: .abbreviated, time: .shortened))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("Imported \(session.importedCount) • Duplicates \(session.duplicateCount) • Failed \(session.failedCount)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .tag(session.id)
+                }
+            }
+            .navigationTitle("Import History")
+        } detail: {
+            if viewModel.selectedSessionItems.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "tray")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.secondary)
+                    Text("No Items")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                List(viewModel.selectedSessionItems) { item in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(item.filename)
+                            Spacer()
+                            Text(statusText(item.state))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(item.sourceRelativePath)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let error = item.errorMessage {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                    }
+                }
+                .navigationTitle("Session Items")
+            }
+        }
+        .frame(minWidth: 920, minHeight: 500)
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button("Refresh") {
+                    viewModel.refreshImportHistory()
+                }
+            }
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Close") {
+                    dismiss()
+                }
+            }
+        }
+    }
+
+    private func statusText(_ state: ImportItemState) -> String {
+        switch state {
+        case .queued: return "Queued"
+        case .hashing: return "Hashing"
+        case .copying: return "Copying"
+        case .verifying: return "Verifying"
+        case .done: return "Done"
+        case .skippedDuplicate: return "Skipped duplicate"
+        case .failed: return "Failed"
         }
     }
 }
