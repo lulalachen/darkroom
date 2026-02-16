@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:darkroom}",
+            "name": "Debug DarkroomApp",
+            "target": "DarkroomApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug DarkroomApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:darkroom}",
+            "name": "Release DarkroomApp",
+            "target": "DarkroomApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release DarkroomApp"
+        }
+    ]
+}

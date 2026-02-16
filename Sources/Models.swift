@@ -75,4 +75,27 @@ struct PhotoAsset: Identifiable, Hashable {
     var id: String { url.path }
 }
 
+enum PhotoTag: String, Codable, CaseIterable {
+    case keep
+    case reject
+
+    var title: String {
+        switch self {
+        case .keep:
+            return "Gray"
+        case .reject:
+            return "Red"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .keep:
+            return "checkmark.circle.fill"
+        case .reject:
+            return "xmark.circle.fill"
+        }
+    }
+}
+
 extension NSImage: @unchecked Sendable {}

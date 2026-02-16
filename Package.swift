@@ -17,7 +17,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "darkroom",
-            path: "Sources"
+            path: "Sources",
+            resources: [
+                .copy("Resources/AppIcon.png")
+            ]
         ),
     ]
 )
