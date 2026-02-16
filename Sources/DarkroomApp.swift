@@ -28,6 +28,13 @@ struct DarkroomApp: App {
             PreferencesView()
                 .environmentObject(preferences)
         }
+        .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About Darkroom") {
+                    showAboutPanel()
+                }
+            }
+        }
     }
 
     private func appIconURL() -> URL? {
@@ -44,5 +51,34 @@ struct DarkroomApp: App {
             subdirectory: "AppIcon.icon/Assets"
         )
         #endif
+    }
+
+    private func showAboutPanel() {
+        let credits = NSMutableAttributedString()
+        credits.append(
+            NSAttributedString(
+                string: "Darkroom\n",
+                attributes: [
+                    .font: NSFont.boldSystemFont(ofSize: 14)
+                ]
+            )
+        )
+        credits.append(
+            NSAttributedString(
+                string: "Fast macOS photo culling and export workflow.\n\nDeveloper: Lulala Chen",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 12),
+                    .foregroundColor: NSColor.secondaryLabelColor
+                ]
+            )
+        )
+
+        NSApplication.shared.orderFrontStandardAboutPanel(
+            options: [
+                .applicationName: "Darkroom",
+                .credits: credits
+            ]
+        )
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }

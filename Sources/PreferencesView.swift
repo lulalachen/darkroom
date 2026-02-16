@@ -64,6 +64,24 @@ struct PreferencesView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section("About Darkroom") {
+                LabeledContent("App") {
+                    Text("Darkroom")
+                }
+                LabeledContent("Version") {
+                    Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0")
+                }
+                LabeledContent("Build") {
+                    Text(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1")
+                }
+                LabeledContent("Developer") {
+                    Text("Lulala Chen")
+                }
+                Text("A fast macOS photo culling and export workflow app with non-destructive adjustments.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .padding(16)
