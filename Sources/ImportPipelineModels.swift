@@ -42,6 +42,10 @@ struct ImportSessionSummary: Identifiable, Hashable {
     let completedAt: Date?
     let sourceVolumePath: String
     let sourceVolumeName: String
+    let renameTemplate: String
+    let customPrefix: String
+    let destinationCollection: String
+    let metadataNote: String
     let requestedCount: Int
     let importedCount: Int
     let duplicateCount: Int
@@ -59,7 +63,57 @@ struct ImportRunResult {
     let destinationRoot: URL
 }
 
+enum ImportRenameTemplate: String, CaseIterable, Identifiable, Codable {
+    case original
+    case dateSequence
+    case customPrefix
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .original: return "Original"
+        case .dateSequence: return "Date + Sequence"
+        case .customPrefix: return "Custom Prefix"
+        }
+    }
+}
+
+struct ImportMetadataTweaks: Codable, Hashable {
+    var creator: String
+    var keywords: String
+    var note: String
+
+    static let empty = ImportMetadataTweaks(creator: "", keywords: "", note: "")
+}
+
+struct ImportOptions: Codable, Hashable {
+    var renameTemplate: ImportRenameTemplate
+    var customPrefix: String
+    var destinationCollection: String
+    var exportBasePath: String
+    var exportFolderName: String
+    var metadata: ImportMetadataTweaks
+
+    static let `default` = ImportOptions(
+        renameTemplate: .original,
+        customPrefix: "",
+        destinationCollection: "",
+        exportBasePath: "",
+        exportFolderName: "",
+        metadata: .empty
+    )
+}
+
 struct ImportFailure: Error {
     let message: String
 }
 
+struct ImportActivityEntry: Identifiable, Hashable {
+    let id: UUID
+    let createdAt: Date
+    let title: String
+    let detail: String
+    let sessionID: Int64?
+    let isError: Bool
+}

@@ -9,6 +9,7 @@ actor ImportManager {
     private let fileManager = FileManager.default
     private let libraryManager: LibraryManager
     private let previewGenerator: PreviewGenerator
+    private let metadataWriter: MetadataWriter
     private let generatesPreviews: Bool
     private var cachedLibraryPaths: LibraryPaths?
     private var importStore: ImportStore?
@@ -16,16 +17,19 @@ actor ImportManager {
     init(
         libraryManager: LibraryManager = .shared,
         previewGenerator: PreviewGenerator = .shared,
+        metadataWriter: MetadataWriter = .shared,
         generatesPreviews: Bool = true
     ) {
         self.libraryManager = libraryManager
         self.previewGenerator = previewGenerator
+        self.metadataWriter = metadataWriter
         self.generatesPreviews = generatesPreviews
     }
 
     func importAssets(
         _ assets: [PhotoAsset],
         sourceVolume: Volume?,
+        options: ImportOptions = .default,
         libraryRootOverride: URL? = nil,
         progress: (@Sendable (ImportProgressSnapshot) -> Void)? = nil
     ) async throws -> ImportRunResult {
@@ -41,10 +45,11 @@ actor ImportManager {
         let sessionID = try await store.createSession(
             sourceVolumePath: sourceVolumePath,
             sourceVolumeName: sourceVolumeName,
-            requestedCount: assets.count
+            requestedCount: assets.count,
+            options: options
         )
         try await store.enqueueItems(sessionID: sessionID, assets: assets, sourceRoot: sourceRoot)
-        try await processSession(sessionID: sessionID, paths: paths, progress: progress)
+        try await processSession(sessionID: sessionID, paths: paths, options: options, progress: progress)
         let summary = try await store.completeSessionIfFinished(sessionID: sessionID)
         return ImportRunResult(session: summary, destinationRoot: paths.originalsRoot)
     }
@@ -57,7 +62,15 @@ actor ImportManager {
         let incomplete = try await store.incompleteSessions()
         var results: [ImportRunResult] = []
         for session in incomplete {
-            try await processSession(sessionID: session.id, paths: paths, progress: progress)
+            let options = ImportOptions(
+                renameTemplate: ImportRenameTemplate(rawValue: session.renameTemplate) ?? .original,
+                customPrefix: session.customPrefix,
+                destinationCollection: "",
+                exportBasePath: "",
+                exportFolderName: session.destinationCollection,
+                metadata: ImportMetadataTweaks(creator: "", keywords: "", note: session.metadataNote)
+            )
+            try await processSession(sessionID: session.id, paths: paths, options: options, progress: progress)
             let summary = try await store.completeSessionIfFinished(sessionID: session.id)
             results.append(ImportRunResult(session: summary, destinationRoot: paths.originalsRoot))
         }
@@ -74,19 +87,52 @@ actor ImportManager {
         return try await store.items(for: sessionID)
     }
 
+    func importedAssetSourcePaths(for assets: [PhotoAsset], sourceRoot: URL) async throws -> Set<String> {
+        let (_, store) = try await bootstrapStore()
+        let fingerprints = try assets.map { try fingerprint(for: $0.url, relativePath: relativePath(for: $0.url, root: sourceRoot)) }
+        let matched = try await store.sourcePathsAlreadyImported(for: fingerprints)
+        var imported: Set<String> = []
+        for asset in assets {
+            let fp = try fingerprint(for: asset.url, relativePath: relativePath(for: asset.url, root: sourceRoot))
+            if matched.contains(fp) {
+                imported.insert(asset.url.path)
+            }
+        }
+        return imported
+    }
+
+    func retryFailedItems(from sessionID: Int64, libraryRootOverride: URL? = nil) async throws -> ImportRunResult {
+        let (_, store) = try await bootstrapStore(overrideRoot: libraryRootOverride)
+        let failedItems = try await store.failedItems(for: sessionID)
+        let session = try await store.sessionSummary(sessionID: sessionID)
+        let assets = failedItems
+            .map { PhotoAsset(url: URL(fileURLWithPath: $0.sourcePath), filename: $0.filename, captureDate: nil, fileSize: nil) }
+        let sourceVolume = Volume(url: URL(fileURLWithPath: session.sourceVolumePath), name: session.sourceVolumeName, isRemovable: true, isInternal: false, capacity: nil)
+        let options = ImportOptions(
+            renameTemplate: ImportRenameTemplate(rawValue: session.renameTemplate) ?? .original,
+            customPrefix: session.customPrefix,
+            destinationCollection: "",
+            exportBasePath: "",
+            exportFolderName: session.destinationCollection,
+            metadata: ImportMetadataTweaks(creator: "", keywords: "", note: session.metadataNote)
+        )
+        return try await importAssets(assets, sourceVolume: sourceVolume, options: options)
+    }
+
     private func processSession(
         sessionID: Int64,
         paths: LibraryPaths,
+        options: ImportOptions = .default,
         progress: (@Sendable (ImportProgressSnapshot) -> Void)?
     ) async throws {
         guard let store = importStore else {
             throw ImportFailure(message: "Import store unavailable.")
         }
         let items = try await store.pendingItems(for: sessionID)
-        let destinationRoot = datedImportFolder(root: paths.originalsRoot)
-        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true, attributes: nil)
+        let destinationRoot = datedImportFolder(root: exportRoot(for: options, defaultRoot: paths.originalsRoot))
+        var didCreateDestinationDirectory = false
 
-        for item in items {
+        for (index, item) in items.enumerated() {
             do {
                 try await store.markItemState(itemID: item.id, state: .hashing, errorMessage: nil)
                 progress?(ImportProgressSnapshot(sessionID: sessionID, item: item.withState(.hashing)))
@@ -95,8 +141,7 @@ actor ImportManager {
                 let sourceFingerprint = try fingerprint(for: sourceURL, relativePath: item.sourceRelativePath)
 
                 if try await store.hasAsset(contentHash: sourceHash, sourceFingerprint: sourceFingerprint) {
-                    try await store.markItemState(itemID: item.id, state: .skippedDuplicate, contentHash: sourceHash)
-                    try await store.updateSessionCounters(sessionID: sessionID, duplicateDelta: 1)
+                    try await store.recordDuplicateItem(sessionID: sessionID, itemID: item.id, contentHash: sourceHash)
                     progress?(ImportProgressSnapshot(sessionID: sessionID, item: item.withState(.skippedDuplicate, hash: sourceHash)))
                     continue
                 }
@@ -104,7 +149,16 @@ actor ImportManager {
                 try await store.markItemState(itemID: item.id, state: .copying, contentHash: sourceHash)
                 progress?(ImportProgressSnapshot(sessionID: sessionID, item: item.withState(.copying, hash: sourceHash)))
 
-                let destinationURL = uniqueDestination(for: item.filename, in: destinationRoot)
+                let destinationFilename = resolvedFilename(
+                    originalFilename: item.filename,
+                    options: options,
+                    sequenceIndex: index + 1
+                )
+                if !didCreateDestinationDirectory {
+                    try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true, attributes: nil)
+                    didCreateDestinationDirectory = true
+                }
+                let destinationURL = uniqueDestination(for: destinationFilename, in: destinationRoot)
                 try fileManager.copyItem(at: sourceURL, to: destinationURL)
 
                 try await store.markItemState(itemID: item.id, state: .verifying, destinationPath: destinationURL.path)
@@ -115,15 +169,20 @@ actor ImportManager {
                     throw ImportFailure(message: "Checksum mismatch after copy.")
                 }
 
-                try await store.recordImportedAsset(
+                try await store.recordSuccessfulImport(
+                    sessionID: sessionID,
+                    itemID: item.id,
                     sourceFingerprint: sourceFingerprint,
                     contentHash: sourceHash,
                     originalPath: destinationURL.path,
-                    filename: item.filename,
-                    sessionID: sessionID
+                    filename: item.filename
                 )
-                try await store.markItemState(itemID: item.id, state: .done, destinationPath: destinationURL.path, contentHash: sourceHash)
-                try await store.updateSessionCounters(sessionID: sessionID, importedDelta: 1)
+                _ = try await metadataWriter.applyTweaks(
+                    options.metadata,
+                    destinationURL: destinationURL,
+                    contentHash: sourceHash,
+                    manifestsRoot: paths.manifestsRoot
+                )
                 if generatesPreviews {
                     await previewGenerator.generatePreviews(
                         for: destinationURL,
@@ -133,16 +192,12 @@ actor ImportManager {
                 }
                 progress?(ImportProgressSnapshot(sessionID: sessionID, item: item.withState(.done, destinationPath: destinationURL.path, hash: sourceHash)))
             } catch {
-                try await store.markItemState(
-                    itemID: item.id,
-                    state: .failed,
-                    errorMessage: (error as? ImportFailure)?.message ?? error.localizedDescription
-                )
-                try await store.updateSessionCounters(sessionID: sessionID, failedDelta: 1)
+                let message = (error as? ImportFailure)?.message ?? error.localizedDescription
+                try await store.recordFailedItem(sessionID: sessionID, itemID: item.id, message: message)
                 progress?(
                     ImportProgressSnapshot(
                         sessionID: sessionID,
-                        item: item.withState(.failed, errorMessage: (error as? ImportFailure)?.message ?? error.localizedDescription)
+                        item: item.withState(.failed, errorMessage: message)
                     )
                 )
             }
@@ -189,12 +244,19 @@ actor ImportManager {
     private func datedImportFolder(root: URL) -> URL {
         let date = Date()
         let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy"
-        let year = formatter.string(from: date)
-        formatter.dateFormat = "MM"
-        let month = formatter.string(from: date)
-        return root.appending(path: year, directoryHint: .isDirectory)
-            .appending(path: month, directoryHint: .isDirectory)
+        formatter.dateFormat = "yyyy-MM-dd"
+        let day = formatter.string(from: date)
+        return root.appending(path: day, directoryHint: .isDirectory)
+    }
+
+    private func exportRoot(for options: ImportOptions, defaultRoot: URL) -> URL {
+        let basePath = options.exportBasePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let folderName = options.exportFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !basePath.isEmpty, !folderName.isEmpty else {
+            return defaultRoot
+        }
+        return URL(fileURLWithPath: basePath, isDirectory: true)
+            .appending(path: sanitizedPathComponent(folderName), directoryHint: .isDirectory)
     }
 
     private func uniqueDestination(for filename: String, in directory: URL) -> URL {
@@ -242,11 +304,59 @@ actor ImportManager {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
+    private func resolvedFilename(originalFilename: String, options: ImportOptions, sequenceIndex: Int) -> String {
+        let ext = (originalFilename as NSString).pathExtension
+        let base = (originalFilename as NSString).deletingPathExtension
+        let stamp = dateStamp()
+
+        let resolvedBase: String
+        switch options.renameTemplate {
+        case .original:
+            resolvedBase = base
+        case .dateSequence:
+            resolvedBase = "\(stamp)-\(String(format: "%04d", sequenceIndex))"
+        case .customPrefix:
+            let prefix = options.customPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+            if prefix.isEmpty {
+                resolvedBase = base
+            } else {
+                resolvedBase = "\(sanitizedPathComponent(prefix))-\(String(format: "%04d", sequenceIndex))"
+            }
+        }
+
+        if ext.isEmpty {
+            return resolvedBase
+        }
+        return "\(resolvedBase).\(ext)"
+    }
+
+    private func dateStamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd"
+        return formatter.string(from: Date())
+    }
+
+    private func sanitizedPathComponent(_ raw: String) -> String {
+        let invalid = CharacterSet(charactersIn: "/:\\?%*|\"<>")
+        let parts = raw.components(separatedBy: invalid).filter { !$0.isEmpty }
+        let joined = parts.joined(separator: "-")
+        return joined.isEmpty ? "Untitled" : joined
+    }
+
     private func fingerprint(for url: URL, relativePath: String) throws -> String {
         let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         let size = Int64(values.fileSize ?? 0)
         let modified = values.contentModificationDate?.timeIntervalSince1970 ?? 0
         return "\(relativePath)|\(size)|\(Int64(modified))"
+    }
+
+    private func relativePath(for fileURL: URL, root: URL) -> String {
+        let fileComponents = fileURL.standardizedFileURL.pathComponents
+        let rootComponents = root.standardizedFileURL.pathComponents
+        if fileComponents.starts(with: rootComponents) {
+            return fileComponents.dropFirst(rootComponents.count).joined(separator: "/")
+        }
+        return fileURL.lastPathComponent
     }
 
     private func commonAncestor(for urls: [URL]) -> URL {

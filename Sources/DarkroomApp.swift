@@ -6,7 +6,7 @@ struct DarkroomApp: App {
     @StateObject private var viewModel = BrowserViewModel()
     
     init() {
-        if let url = Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
+        if let url = appIconURL(),
            let image = NSImage(contentsOf: url) {
             NSApplication.shared.applicationIconImage = image
         }
@@ -21,5 +21,13 @@ struct DarkroomApp: App {
                 }
         }
         .defaultSize(width: 1200, height: 720)
+    }
+
+    private func appIconURL() -> URL? {
+        #if SWIFT_PACKAGE
+        return Bundle.module.url(forResource: "AppIcon", withExtension: "png")
+        #else
+        return Bundle.main.url(forResource: "AppIcon", withExtension: "png")
+        #endif
     }
 }

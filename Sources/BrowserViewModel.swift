@@ -44,9 +44,13 @@ final class BrowserViewModel: ObservableObject {
     @Published private(set) var isImporting: Bool = false
     @Published private(set) var importStatus: String?
     @Published private(set) var gridColumnCount: Int = 1
+    @Published var importOptions: ImportOptions = .default
     @Published private(set) var importItemStates: [PhotoAsset.ID: ImportItemState] = [:]
+    @Published private(set) var alreadyImportedAssetIDs: Set<PhotoAsset.ID> = []
     @Published private(set) var recentImportSessions: [ImportSessionSummary] = []
     @Published private(set) var selectedSessionItems: [ImportQueueItem] = []
+    @Published private(set) var activityEntries: [ImportActivityEntry] = []
+    @Published private(set) var stagedAssetIDs: [PhotoAsset.ID] = []
     @Published var selectedImportSessionID: Int64? {
         didSet {
             guard selectedImportSessionID != oldValue else { return }
@@ -91,6 +95,13 @@ final class BrowserViewModel: ObservableObject {
         }
     }
 
+    var stagedPhotoAssets: [PhotoAsset] {
+        let auto = Set(photoAssets.filter { tags[$0.id] == .keep }.map(\.id))
+        let manual = Set(stagedAssetIDs)
+        let all = auto.union(manual)
+        return photoAssets.filter { all.contains($0.id) }
+    }
+
     init(volumeWatcher: VolumeWatcher? = nil, libraryManager: LibraryManager = .shared, mockVolumes: [Volume]? = nil) {
         let watcher = volumeWatcher ?? VolumeWatcher()
         self.volumeWatcher = watcher
@@ -127,19 +138,29 @@ final class BrowserViewModel: ObservableObject {
 
     func importMarkedPhotos() {
         guard !isImporting else { return }
-        let marked = photoAssets.filter { tags[$0.id] == .keep }
+        let marked = stagedPhotoAssets
         let currentVolume = selectedVolume
         guard !marked.isEmpty else {
-            importStatus = "No photos tagged Green yet."
+            importStatus = "No photos staged for import yet."
             return
         }
 
         isImporting = true
         importStatus = "Importing \(marked.count) photo(s)..."
+        recordActivity(
+            title: "Import Started",
+            detail: "Staged \(marked.count) photo(s) for import.",
+            sessionID: nil,
+            isError: false
+        )
 
         Task {
             do {
-                let result = try await importManager.importAssets(marked, sourceVolume: currentVolume) { [weak self] snapshot in
+                let result = try await importManager.importAssets(
+                    marked,
+                    sourceVolume: currentVolume,
+                    options: importOptions
+                ) { [weak self] snapshot in
                     Task { @MainActor in
                         self?.setImportState(forSourcePath: snapshot.item.sourcePath, state: snapshot.item.state)
                     }
@@ -149,11 +170,24 @@ final class BrowserViewModel: ObservableObject {
                     self.importStatus = "Imported \(summary.importedCount), skipped \(summary.duplicateCount), failed \(summary.failedCount)."
                     self.isImporting = false
                     self.refreshImportHistory()
+                    self.refreshAlreadyImportedBadges()
+                    self.recordActivity(
+                        title: "Import Session #\(summary.id)",
+                        detail: "Imported \(summary.importedCount), skipped \(summary.duplicateCount), failed \(summary.failedCount).",
+                        sessionID: summary.id,
+                        isError: summary.failedCount > 0
+                    )
                 }
             } catch {
                 await MainActor.run {
                     self.importStatus = "Import failed: \(error.localizedDescription)"
                     self.isImporting = false
+                    self.recordActivity(
+                        title: "Import Failed",
+                        detail: error.localizedDescription,
+                        sessionID: nil,
+                        isError: true
+                    )
                 }
             }
         }
@@ -188,6 +222,74 @@ final class BrowserViewModel: ObservableObject {
             } catch {
                 await MainActor.run {
                     self.importStatus = "Could not load import history: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func stageAsset(withID id: PhotoAsset.ID) {
+        guard photoAssets.contains(where: { $0.id == id }) else { return }
+        if !stagedAssetIDs.contains(id) {
+            stagedAssetIDs.append(id)
+        }
+    }
+
+    func unstageAsset(withID id: PhotoAsset.ID) {
+        stagedAssetIDs.removeAll { $0 == id }
+    }
+
+    func clearManualStaging() {
+        stagedAssetIDs.removeAll()
+    }
+
+    var hasValidExportTarget: Bool {
+        let path = importOptions.exportBasePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let folder = importOptions.exportFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !path.isEmpty && !folder.isEmpty
+    }
+
+    func refreshAlreadyImportedBadges() {
+        guard let root = selectedVolume?.importRoot else { return }
+        let assets = photoAssets
+        Task {
+            let importedPaths = (try? await importManager.importedAssetSourcePaths(for: assets, sourceRoot: root)) ?? []
+            await MainActor.run {
+                self.alreadyImportedAssetIDs = Set(
+                    assets.filter { importedPaths.contains($0.url.path) }.map(\.id)
+                )
+            }
+        }
+    }
+
+    func retryFailedImports(for sessionID: Int64) {
+        guard !isImporting else { return }
+        isImporting = true
+        importStatus = "Retrying failed items from session \(sessionID)..."
+        Task {
+            do {
+                let result = try await importManager.retryFailedItems(from: sessionID)
+                await MainActor.run {
+                    self.isImporting = false
+                    self.importStatus = "Retry complete: imported \(result.session.importedCount), duplicates \(result.session.duplicateCount), failed \(result.session.failedCount)."
+                    self.refreshImportHistory()
+                    self.refreshAlreadyImportedBadges()
+                    self.recordActivity(
+                        title: "Retry Session #\(result.session.id)",
+                        detail: "Imported \(result.session.importedCount), skipped \(result.session.duplicateCount), failed \(result.session.failedCount).",
+                        sessionID: result.session.id,
+                        isError: result.session.failedCount > 0
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    self.isImporting = false
+                    self.importStatus = "Retry failed: \(error.localizedDescription)"
+                    self.recordActivity(
+                        title: "Retry Failed",
+                        detail: error.localizedDescription,
+                        sessionID: sessionID,
+                        isError: true
+                    )
                 }
             }
         }
@@ -250,6 +352,8 @@ final class BrowserViewModel: ObservableObject {
             selectedAssetID = nil
             tags = [:]
             importItemStates = [:]
+            alreadyImportedAssetIDs = []
+            stagedAssetIDs = []
             return
         }
         isLoadingAssets = true
@@ -257,10 +361,15 @@ final class BrowserViewModel: ObservableObject {
         Task {
             let assets = await enumerator.assets(at: root)
             let loadedTags = await finderTagManager.tagMap(for: assets)
+            let importedPaths = (try? await importManager.importedAssetSourcePaths(for: assets, sourceRoot: root)) ?? []
             await MainActor.run {
                 self.photoAssets = assets
                 self.tags = loadedTags
                 self.importItemStates = [:]
+                self.alreadyImportedAssetIDs = Set(
+                    assets.filter { importedPaths.contains($0.url.path) }.map(\.id)
+                )
+                self.stagedAssetIDs = []
                 self.ensureSelectedAssetVisible(defaultToFirst: true)
                 self.isLoadingAssets = false
             }
@@ -291,6 +400,23 @@ final class BrowserViewModel: ObservableObject {
             return
         }
         importItemStates[matchingAsset.id] = state
+    }
+
+    private func recordActivity(title: String, detail: String, sessionID: Int64?, isError: Bool) {
+        activityEntries.insert(
+            ImportActivityEntry(
+                id: UUID(),
+                createdAt: Date(),
+                title: title,
+                detail: detail,
+                sessionID: sessionID,
+                isError: isError
+            ),
+            at: 0
+        )
+        if activityEntries.count > 200 {
+            activityEntries.removeLast(activityEntries.count - 200)
+        }
     }
 
     private func setSelectedTag(_ tag: PhotoTag) {

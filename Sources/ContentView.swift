@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var viewModel: BrowserViewModel
@@ -64,6 +65,8 @@ struct BrowserDetailView: View {
     @ObservedObject var viewModel: BrowserViewModel
     @State private var keyMonitor: Any?
     @State private var showsImportHistory = false
+    @State private var showsActivityCenter = false
+    @State private var showsExportSetup = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -85,6 +88,7 @@ struct BrowserDetailView: View {
                 }
             }
 
+            ImportStagingTray(viewModel: viewModel)
             Divider()
             ImportStatusBar(viewModel: viewModel)
         }
@@ -108,33 +112,38 @@ struct BrowserDetailView: View {
                 Button("Green (Z)") {
                     viewModel.tagSelectedAsKeep()
                 }
-                .keyboardShortcut("z", modifiers: [])
 
                 Button("Red (X)") {
                     viewModel.tagSelectedAsReject()
                 }
-                .keyboardShortcut("x", modifiers: [])
 
                 Button("Clear (C)") {
                     viewModel.clearSelectedTag()
                 }
-                .keyboardShortcut("c", modifiers: [])
 
                 Button {
-                    viewModel.importMarkedPhotos()
+                    if viewModel.hasValidExportTarget {
+                        viewModel.importMarkedPhotos()
+                    } else {
+                        showsExportSetup = true
+                    }
                 } label: {
                     if viewModel.isImporting {
                         ProgressView()
                             .controlSize(.small)
                     } else {
-                        Label("Import Green (\(viewModel.keepCount))", systemImage: "square.and.arrow.down")
+                        Label("Import Staged (\(viewModel.stagedPhotoAssets.count))", systemImage: "square.and.arrow.down")
                     }
                 }
-                .disabled(viewModel.keepCount == 0 || viewModel.isImporting)
+                .disabled(viewModel.stagedPhotoAssets.isEmpty || viewModel.isImporting)
 
                 Button("History") {
                     viewModel.refreshImportHistory()
                     showsImportHistory = true
+                }
+
+                Button("Activity") {
+                    showsActivityCenter = true
                 }
             }
 
@@ -149,10 +158,20 @@ struct BrowserDetailView: View {
         .sheet(isPresented: $showsImportHistory) {
             ImportHistorySheet(viewModel: viewModel)
         }
+        .sheet(isPresented: $showsActivityCenter) {
+            ImportActivitySheet(viewModel: viewModel)
+        }
+        .sheet(isPresented: $showsExportSetup) {
+            ExportSetupSheet(viewModel: viewModel) {
+                showsExportSetup = false
+                viewModel.importMarkedPhotos()
+            }
+        }
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
         guard event.type == .keyDown else { return false }
+        if isTextInputFocused() { return false }
         let blockedModifiers: NSEvent.ModifierFlags = [.command, .control, .option]
         if !event.modifierFlags.intersection(blockedModifiers).isEmpty {
             return false
@@ -195,6 +214,16 @@ struct BrowserDetailView: View {
                 return false
             }
         }
+    }
+
+    private func isTextInputFocused() -> Bool {
+        guard let responder = NSApp.keyWindow?.firstResponder else {
+            return false
+        }
+        if let textView = responder as? NSTextView {
+            return textView.isFieldEditor || textView.isEditable
+        }
+        return responder is NSTextField
     }
 
     private func installKeyMonitor() {
@@ -262,11 +291,15 @@ struct PhotoGridPane: View {
                                 asset: asset,
                                 isSelected: asset.id == viewModel.selectedAssetID,
                                 tag: viewModel.tag(for: asset),
-                                importState: viewModel.importItemStates[asset.id]
+                                importState: viewModel.importItemStates[asset.id],
+                                isAlreadyImported: viewModel.alreadyImportedAssetIDs.contains(asset.id)
                             )
                             .id(asset.id)
                             .onTapGesture {
                                 viewModel.select(asset)
+                            }
+                            .onDrag {
+                                NSItemProvider(object: asset.id as NSString)
                             }
                         }
                     }
@@ -345,17 +378,14 @@ struct PreviewPane: View {
                     Button("Green (Z)") {
                         viewModel.tagSelectedAsKeep()
                     }
-                    .keyboardShortcut("z", modifiers: [])
 
                     Button("Red (X)") {
                         viewModel.tagSelectedAsReject()
                     }
-                    .keyboardShortcut("x", modifiers: [])
 
                     Button("Clear (C)") {
                         viewModel.clearSelectedTag()
                     }
-                    .keyboardShortcut("c", modifiers: [])
                 }
             } else {
                 Text("Select a photo to preview")
@@ -383,6 +413,7 @@ struct ImportStatusBar: View {
             Text("Visible: \(viewModel.visiblePhotoAssets.count)")
             Text("Green: \(viewModel.keepCount)")
             Text("Red: \(viewModel.rejectCount)")
+            Text("Staged: \(viewModel.stagedPhotoAssets.count)")
             if viewModel.isImporting {
                 Text("Importing...")
             }
@@ -397,6 +428,167 @@ struct ImportStatusBar: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .font(.caption)
+    }
+}
+
+struct ImportStagingTray: View {
+    @ObservedObject var viewModel: BrowserViewModel
+    @State private var isDropTargeted = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Import Staging Tray", systemImage: "tray.and.arrow.down")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button("Clear Manual") {
+                    viewModel.clearManualStaging()
+                }
+                .disabled(viewModel.stagedAssetIDs.isEmpty)
+            }
+
+            HStack(spacing: 10) {
+                Picker("Rename", selection: $viewModel.importOptions.renameTemplate) {
+                    ForEach(ImportRenameTemplate.allCases) { template in
+                        Text(template.title).tag(template)
+                    }
+                }
+                .frame(width: 210)
+
+                if viewModel.importOptions.renameTemplate == .customPrefix {
+                    TextField("Custom prefix", text: $viewModel.importOptions.customPrefix)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 180)
+                }
+
+                Button("Choose Export Path") {
+                    chooseExportPath()
+                }
+
+                TextField("Folder name (required)", text: $viewModel.importOptions.exportFolderName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 180)
+
+                TextField("Creator", text: $viewModel.importOptions.metadata.creator)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 140)
+
+                TextField("Keywords", text: $viewModel.importOptions.metadata.keywords)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 140)
+            }
+
+            TextField("Import note / metadata tweak", text: $viewModel.importOptions.metadata.note)
+                .textFieldStyle(.roundedBorder)
+
+            if !viewModel.importOptions.exportBasePath.isEmpty {
+                Text("Export path: \(viewModel.importOptions.exportBasePath)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Export path not set")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if viewModel.stagedPhotoAssets.isEmpty {
+                Text("Drop photos here from the grid, or tag photos Green to auto-stage.")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 6)
+            } else {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(viewModel.stagedPhotoAssets) { asset in
+                            StagedAssetChip(
+                                asset: asset,
+                                state: viewModel.importItemStates[asset.id],
+                                isAutoStaged: viewModel.tag(for: asset) == .keep
+                            ) {
+                                viewModel.unstageAsset(withID: asset.id)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(NSColor.controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(isDropTargeted ? .green : .clear, lineWidth: 2)
+        )
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .onDrop(of: [UTType.text.identifier], isTargeted: $isDropTargeted) { providers in
+            for provider in providers where provider.canLoadObject(ofClass: NSString.self) {
+                _ = provider.loadObject(ofClass: NSString.self) { item, _ in
+                    guard let id = item as? String else { return }
+                    Task { @MainActor in
+                        viewModel.stageAsset(withID: id)
+                    }
+                }
+            }
+            return true
+        }
+    }
+
+    private func chooseExportPath() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        panel.message = "Choose base export directory"
+        if panel.runModal() == .OK, let url = panel.url {
+            viewModel.importOptions.exportBasePath = url.path
+        }
+    }
+}
+
+struct StagedAssetChip: View {
+    let asset: PhotoAsset
+    let state: ImportItemState?
+    let isAutoStaged: Bool
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(asset.filename)
+                .lineLimit(1)
+                .font(.caption)
+            if let state {
+                Text(label(for: state))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            if !isAutoStaged {
+                Button {
+                    onRemove()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(.thinMaterial, in: Capsule())
+    }
+
+    private func label(for state: ImportItemState) -> String {
+        switch state {
+        case .queued: return "Queued"
+        case .hashing: return "Hashing"
+        case .copying: return "Copying"
+        case .verifying: return "Verifying"
+        case .done: return "Done"
+        case .skippedDuplicate: return "Duplicate"
+        case .failed: return "Failed"
+        }
     }
 }
 
@@ -432,6 +624,7 @@ struct ThumbnailCell: View {
     let isSelected: Bool
     let tag: PhotoTag?
     let importState: ImportItemState?
+    let isAlreadyImported: Bool
 
     @State private var image: NSImage?
 
@@ -478,6 +671,17 @@ struct ThumbnailCell: View {
                     .padding(8)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
+
+            if isAlreadyImported {
+                Text("Already Imported")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(.green.opacity(0.85), in: Capsule())
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            }
         }
         .saturation(tag == .reject ? 0 : 1)
         .brightness(tag == .reject ? -0.15 : 0)
@@ -519,9 +723,26 @@ struct ImportHistorySheet: View {
                         Text(session.startedAt.formatted(date: .abbreviated, time: .shortened))
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text("Imported \(session.importedCount) • Duplicates \(session.duplicateCount) • Failed \(session.failedCount)")
-                            .font(.caption)
+                        HStack {
+                            Text("Imported \(session.importedCount) • Duplicates \(session.duplicateCount) • Failed \(session.failedCount)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            if session.failedCount > 0 {
+                                Button("Retry Failed") {
+                                    viewModel.retryFailedImports(for: session.id)
+                                }
+                                .buttonStyle(.link)
+                            }
+                        }
+                        Text("Rename: \(session.renameTemplate) • Collection: \(session.destinationCollection.isEmpty ? "Default" : session.destinationCollection)")
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
+                        if !session.metadataNote.isEmpty {
+                            Text(session.metadataNote)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     .tag(session.id)
                 }
@@ -583,6 +804,116 @@ struct ImportHistorySheet: View {
         case .done: return "Done"
         case .skippedDuplicate: return "Skipped duplicate"
         case .failed: return "Failed"
+        }
+    }
+}
+
+struct ImportActivitySheet: View {
+    @ObservedObject var viewModel: BrowserViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if viewModel.activityEntries.isEmpty {
+                Text("No activity yet.")
+                    .foregroundStyle(.secondary)
+            } else {
+                List(viewModel.activityEntries) { entry in
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: entry.isError ? "exclamationmark.triangle.fill" : "clock.arrow.circlepath")
+                            .foregroundStyle(entry.isError ? .red : .secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(entry.title)
+                                .font(.headline)
+                            Text(entry.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(entry.createdAt.formatted(date: .abbreviated, time: .standard))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if let sessionID = entry.sessionID {
+                            HStack(spacing: 8) {
+                                Button("Open Session") {
+                                    viewModel.selectedImportSessionID = sessionID
+                                }
+                                if entry.isError {
+                                    Button("Retry Failed") {
+                                        viewModel.retryFailedImports(for: sessionID)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+        .padding(12)
+        .frame(minWidth: 760, minHeight: 460)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Close") {
+                    dismiss()
+                }
+            }
+        }
+    }
+}
+
+struct ExportSetupSheet: View {
+    @ObservedObject var viewModel: BrowserViewModel
+    let onConfirm: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Set Export Destination")
+                .font(.headline)
+            Text("Output format will be `YYYY-MM-DD/<photo-name>` under the selected base path and folder name.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Button("Choose Export Path") {
+                    chooseExportPath()
+                }
+                if !viewModel.importOptions.exportBasePath.isEmpty {
+                    Text(viewModel.importOptions.exportBasePath)
+                        .lineLimit(1)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            TextField("Folder name", text: $viewModel.importOptions.exportFolderName)
+                .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                }
+                Button("Continue") {
+                    onConfirm()
+                }
+                .disabled(!viewModel.hasValidExportTarget)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 540)
+    }
+
+    private func chooseExportPath() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        panel.message = "Choose base export directory"
+        if panel.runModal() == .OK, let url = panel.url {
+            viewModel.importOptions.exportBasePath = url.path
         }
     }
 }

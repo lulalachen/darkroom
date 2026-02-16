@@ -1,0 +1,39 @@
+name: Darkroom
+
+options:
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    SWIFT_VERSION: "5.0"
+
+targets:
+  Darkroom:
+    type: application
+    platform: macOS
+    sources:
+      - Sources
+    resources:
+      - Sources/Resources/AppIcon.png
+    settings:
+      base:
+        PRODUCT_NAME: Darkroom
+        PRODUCT_BUNDLE_IDENTIFIER: com.darkroom.app
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Darkroom
+        INFOPLIST_KEY_CFBundleShortVersionString: "0.1.0"
+        INFOPLIST_KEY_CFBundleVersion: "1"
+        INFOPLIST_KEY_NSHighResolutionCapable: true
+        CODE_SIGNING_ALLOWED: NO
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lsqlite3"
+
+schemes:
+  Darkroom:
+    build:
+      targets:
+        Darkroom: all
+    run:
+      config: Debug

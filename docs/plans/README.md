@@ -18,3 +18,9 @@ To build a launchable macOS app bundle while working from this repository, use:
 ```
 
 The script outputs `dist/debug/Darkroom.app` (or `dist/release/Darkroom.app` when called with `release`).
+
+For native Xcode app development workflow, generate the project with:
+
+```bash
+xcodegen generate
+```

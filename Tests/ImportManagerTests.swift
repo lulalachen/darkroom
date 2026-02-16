@@ -62,7 +62,12 @@ final class ImportManagerTests: XCTestCase {
         try FileManager.default.createDirectory(at: manifestsRoot, withIntermediateDirectories: true)
         let store = ImportStore(databaseURL: manifestsRoot.appending(path: "imports.sqlite3", directoryHint: .notDirectory))
         try await store.prepareSchema()
-        let sessionID = try await store.createSession(sourceVolumePath: sourceRoot.path, sourceVolumeName: "TestVolume", requestedCount: 1)
+        let sessionID = try await store.createSession(
+            sourceVolumePath: sourceRoot.path,
+            sourceVolumeName: "TestVolume",
+            requestedCount: 1,
+            options: .default
+        )
         try await store.enqueueItems(sessionID: sessionID, assets: [asset(file)], sourceRoot: sourceRoot)
 
         let manager = ImportManager(generatesPreviews: false)
@@ -72,6 +77,120 @@ final class ImportManagerTests: XCTestCase {
         XCTAssertEqual(resumed[0].session.id, sessionID)
         XCTAssertEqual(resumed[0].session.importedCount, 1)
         XCTAssertTrue(resumed[0].session.isCompleted)
+    }
+
+    func testImportWritesMetadataSidecarForUnsupportedFormats() async throws {
+        let sandbox = try makeSandbox(name: "metadata-sidecar")
+        let sourceRoot = sandbox.appending(path: "source", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        let file = sourceRoot.appending(path: "photo.raw", directoryHint: .notDirectory)
+        try Data("raw-payload".utf8).write(to: file)
+
+        let options = ImportOptions(
+            renameTemplate: .original,
+            customPrefix: "",
+            destinationCollection: "",
+            exportBasePath: "",
+            exportFolderName: "",
+            metadata: ImportMetadataTweaks(creator: "Alice", keywords: "wedding, portrait", note: "Client selects")
+        )
+        let libraryRoot = sandbox.appending(path: "library", directoryHint: .isDirectory)
+        let manager = ImportManager(generatesPreviews: false)
+        let result = try await manager.importAssets([asset(file)], sourceVolume: nil, options: options, libraryRootOverride: libraryRoot)
+
+        XCTAssertEqual(result.session.importedCount, 1)
+        let sidecars = try contentsRecursively(at: libraryRoot.appending(path: "Manifests/Metadata", directoryHint: .isDirectory))
+        XCTAssertEqual(sidecars.count, 1)
+        let sidecarData = try Data(contentsOf: sidecars[0])
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(MetadataSidecarRecord.self, from: sidecarData)
+        XCTAssertEqual(decoded.creator, "Alice")
+        XCTAssertEqual(decoded.keywords, ["wedding", "portrait"])
+        XCTAssertEqual(decoded.note, "Client selects")
+        XCTAssertFalse(decoded.embeddedWriteApplied)
+    }
+
+    func testImportedAssetSourcePathsFindsAlreadyImportedItems() async throws {
+        let sandbox = try makeSandbox(name: "imported-badge")
+        let sourceRoot = sandbox.appending(path: "source", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        let fileA = sourceRoot.appending(path: "a.jpg", directoryHint: .notDirectory)
+        let fileB = sourceRoot.appending(path: "b.jpg", directoryHint: .notDirectory)
+        try Data("aaa".utf8).write(to: fileA)
+        try Data("bbb".utf8).write(to: fileB)
+
+        let libraryRoot = sandbox.appending(path: "library", directoryHint: .isDirectory)
+        let manager = ImportManager(generatesPreviews: false)
+        _ = try await manager.importAssets([asset(fileA)], sourceVolume: nil, libraryRootOverride: libraryRoot)
+
+        let imported = try await manager.importedAssetSourcePaths(for: [asset(fileA), asset(fileB)], sourceRoot: sourceRoot)
+        XCTAssertTrue(imported.contains(fileA.path))
+        XCTAssertFalse(imported.contains(fileB.path))
+    }
+
+    func testRetryFailedItemsCreatesNewSession() async throws {
+        let sandbox = try makeSandbox(name: "retry-failed")
+        let sourceRoot = sandbox.appending(path: "source", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        let file = sourceRoot.appending(path: "retry.jpg", directoryHint: .notDirectory)
+        try Data("retry-content".utf8).write(to: file)
+
+        let libraryRoot = sandbox.appending(path: "library", directoryHint: .isDirectory)
+        let manifestsRoot = libraryRoot.appending(path: "Manifests", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: manifestsRoot, withIntermediateDirectories: true)
+        let store = ImportStore(databaseURL: manifestsRoot.appending(path: "imports.sqlite3", directoryHint: .notDirectory))
+        try await store.prepareSchema()
+
+        let sessionID = try await store.createSession(
+            sourceVolumePath: sourceRoot.path,
+            sourceVolumeName: "RetryVolume",
+            requestedCount: 1,
+            options: .default
+        )
+        try await store.enqueueItems(sessionID: sessionID, assets: [asset(file)], sourceRoot: sourceRoot)
+        let queued = try await store.items(for: sessionID)
+        XCTAssertEqual(queued.count, 1)
+        try await store.recordFailedItem(sessionID: sessionID, itemID: queued[0].id, message: "Injected failure")
+
+        let manager = ImportManager(generatesPreviews: false)
+        let retryResult = try await manager.retryFailedItems(from: sessionID, libraryRootOverride: libraryRoot)
+
+        XCTAssertNotEqual(retryResult.session.id, sessionID)
+        XCTAssertEqual(retryResult.session.importedCount, 1)
+    }
+
+    func testExportPathUsesFolderNameAndDateFormat() async throws {
+        let sandbox = try makeSandbox(name: "export-format")
+        let sourceRoot = sandbox.appending(path: "source", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        let file = sourceRoot.appending(path: "photo.jpg", directoryHint: .notDirectory)
+        try Data("photo-data".utf8).write(to: file)
+
+        let exportBase = sandbox.appending(path: "exports", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: exportBase, withIntermediateDirectories: true)
+        let options = ImportOptions(
+            renameTemplate: .original,
+            customPrefix: "",
+            destinationCollection: "",
+            exportBasePath: exportBase.path,
+            exportFolderName: "Sik day",
+            metadata: .empty
+        )
+
+        let libraryRoot = sandbox.appending(path: "library", directoryHint: .isDirectory)
+        let manager = ImportManager(generatesPreviews: false)
+        _ = try await manager.importAssets([asset(file)], sourceVolume: nil, options: options, libraryRootOverride: libraryRoot)
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let expectedDayFolder = formatter.string(from: Date())
+        let expectedRoot = exportBase
+            .appending(path: "Sik day", directoryHint: .isDirectory)
+            .appending(path: expectedDayFolder, directoryHint: .isDirectory)
+        let exportedFiles = try contentsRecursively(at: expectedRoot)
+        XCTAssertEqual(exportedFiles.count, 1)
+        XCTAssertEqual(exportedFiles.first?.lastPathComponent, "photo.jpg")
     }
 
     private func asset(_ url: URL) -> PhotoAsset {
@@ -99,4 +218,3 @@ final class ImportManagerTests: XCTestCase {
         }
     }
 }
-

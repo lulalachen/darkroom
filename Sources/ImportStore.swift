@@ -27,6 +27,10 @@ actor ImportStore {
                 completed_at REAL,
                 source_volume_path TEXT NOT NULL,
                 source_volume_name TEXT NOT NULL,
+                rename_template TEXT NOT NULL DEFAULT 'original',
+                custom_prefix TEXT NOT NULL DEFAULT '',
+                destination_collection TEXT NOT NULL DEFAULT '',
+                metadata_note TEXT NOT NULL DEFAULT '',
                 requested_count INTEGER NOT NULL,
                 imported_count INTEGER NOT NULL DEFAULT 0,
                 duplicate_count INTEGER NOT NULL DEFAULT 0,
@@ -61,6 +65,8 @@ actor ImportStore {
                 content_hash TEXT NOT NULL UNIQUE,
                 original_path TEXT NOT NULL,
                 filename TEXT NOT NULL,
+                rating INTEGER NOT NULL DEFAULT 0,
+                edit_stack_pointer TEXT NOT NULL DEFAULT '',
                 imported_at REAL NOT NULL,
                 session_id INTEGER NOT NULL,
                 FOREIGN KEY(session_id) REFERENCES import_sessions(id)
@@ -69,14 +75,16 @@ actor ImportStore {
         )
         try execute("CREATE INDEX IF NOT EXISTS idx_items_session_state ON import_items(session_id, state);")
         try execute("CREATE INDEX IF NOT EXISTS idx_items_updated ON import_items(updated_at);")
+        try ensureSessionColumns()
+        try ensureAssetColumns()
     }
 
-    func createSession(sourceVolumePath: String, sourceVolumeName: String, requestedCount: Int) throws -> Int64 {
+    func createSession(sourceVolumePath: String, sourceVolumeName: String, requestedCount: Int, options: ImportOptions) throws -> Int64 {
         try ensureOpen()
         let sql = """
         INSERT INTO import_sessions (
-            started_at, source_volume_path, source_volume_name, requested_count, is_completed
-        ) VALUES (?, ?, ?, ?, 0);
+            started_at, source_volume_path, source_volume_name, rename_template, custom_prefix, destination_collection, metadata_note, requested_count, is_completed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0);
         """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
@@ -87,7 +95,11 @@ actor ImportStore {
         sqlite3_bind_double(statement, 1, Date().timeIntervalSince1970)
         sqlite3_bind_text(statement, 2, sourceVolumePath, -1, SQLITE_TRANSIENT)
         sqlite3_bind_text(statement, 3, sourceVolumeName, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int64(statement, 4, Int64(requestedCount))
+        sqlite3_bind_text(statement, 4, options.renameTemplate.rawValue, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(statement, 5, options.customPrefix, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(statement, 6, persistedCollection(from: options), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(statement, 7, metadataSummary(from: options), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int64(statement, 8, Int64(requestedCount))
 
         guard sqlite3_step(statement) == SQLITE_DONE else {
             throw lastError()
@@ -315,7 +327,7 @@ actor ImportStore {
     func sessionSummary(sessionID: Int64) throws -> ImportSessionSummary {
         try ensureOpen()
         let sql = """
-        SELECT id, started_at, completed_at, source_volume_path, source_volume_name, requested_count, imported_count, duplicate_count, failed_count, is_completed
+        SELECT id, started_at, completed_at, source_volume_path, source_volume_name, rename_template, custom_prefix, destination_collection, metadata_note, requested_count, imported_count, duplicate_count, failed_count, is_completed
         FROM import_sessions
         WHERE id = ?;
         """
@@ -335,7 +347,7 @@ actor ImportStore {
     func recentSessions(limit: Int) throws -> [ImportSessionSummary] {
         try ensureOpen()
         let sql = """
-        SELECT id, started_at, completed_at, source_volume_path, source_volume_name, requested_count, imported_count, duplicate_count, failed_count, is_completed
+        SELECT id, started_at, completed_at, source_volume_path, source_volume_name, rename_template, custom_prefix, destination_collection, metadata_note, requested_count, imported_count, duplicate_count, failed_count, is_completed
         FROM import_sessions
         ORDER BY started_at DESC
         LIMIT ?;
@@ -357,7 +369,7 @@ actor ImportStore {
     func incompleteSessions() throws -> [ImportSessionSummary] {
         try ensureOpen()
         let sql = """
-        SELECT id, started_at, completed_at, source_volume_path, source_volume_name, requested_count, imported_count, duplicate_count, failed_count, is_completed
+        SELECT id, started_at, completed_at, source_volume_path, source_volume_name, rename_template, custom_prefix, destination_collection, metadata_note, requested_count, imported_count, duplicate_count, failed_count, is_completed
         FROM import_sessions
         WHERE is_completed = 0
         ORDER BY started_at ASC;
@@ -375,6 +387,149 @@ actor ImportStore {
         return rows
     }
 
+    func failedItems(for sessionID: Int64) throws -> [ImportQueueItem] {
+        try ensureOpen()
+        let sql = """
+        SELECT id, session_id, source_path, source_relative_path, filename, state, destination_path, content_hash, error_message, updated_at
+        FROM import_items
+        WHERE session_id = ? AND state = ?
+        ORDER BY id ASC;
+        """
+        return try readItems(sql: sql, binder: { statement in
+            sqlite3_bind_int64(statement, 1, sessionID)
+            sqlite3_bind_text(statement, 2, ImportItemState.failed.rawValue, -1, SQLITE_TRANSIENT)
+        })
+    }
+
+    func sourcePathsAlreadyImported(for fingerprints: [String]) throws -> Set<String> {
+        try ensureOpen()
+        guard !fingerprints.isEmpty else { return [] }
+        let sql = "SELECT source_fingerprint FROM assets WHERE source_fingerprint = ? LIMIT 1;"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw lastError()
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var matched = Set<String>()
+        for fingerprint in fingerprints {
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+            sqlite3_bind_text(statement, 1, fingerprint, -1, SQLITE_TRANSIENT)
+            if sqlite3_step(statement) == SQLITE_ROW {
+                matched.insert(fingerprint)
+            }
+        }
+        return matched
+    }
+
+    func recordDuplicateItem(sessionID: Int64, itemID: Int64, contentHash: String) throws {
+        try inTransaction {
+            try execute(
+                """
+                UPDATE import_items
+                SET state = ?, content_hash = ?, error_message = NULL, updated_at = ?
+                WHERE id = ?;
+                """,
+                binder: { statement in
+                    sqlite3_bind_text(statement, 1, ImportItemState.skippedDuplicate.rawValue, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(statement, 2, contentHash, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_double(statement, 3, Date().timeIntervalSince1970)
+                    sqlite3_bind_int64(statement, 4, itemID)
+                }
+            )
+            try execute(
+                """
+                UPDATE import_sessions
+                SET duplicate_count = duplicate_count + 1
+                WHERE id = ?;
+                """,
+                binder: { statement in
+                    sqlite3_bind_int64(statement, 1, sessionID)
+                }
+            )
+        }
+    }
+
+    func recordFailedItem(sessionID: Int64, itemID: Int64, message: String) throws {
+        try inTransaction {
+            try execute(
+                """
+                UPDATE import_items
+                SET state = ?, error_message = ?, updated_at = ?
+                WHERE id = ?;
+                """,
+                binder: { statement in
+                    sqlite3_bind_text(statement, 1, ImportItemState.failed.rawValue, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(statement, 2, message, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_double(statement, 3, Date().timeIntervalSince1970)
+                    sqlite3_bind_int64(statement, 4, itemID)
+                }
+            )
+            try execute(
+                """
+                UPDATE import_sessions
+                SET failed_count = failed_count + 1
+                WHERE id = ?;
+                """,
+                binder: { statement in
+                    sqlite3_bind_int64(statement, 1, sessionID)
+                }
+            )
+        }
+    }
+
+    func recordSuccessfulImport(
+        sessionID: Int64,
+        itemID: Int64,
+        sourceFingerprint: String,
+        contentHash: String,
+        originalPath: String,
+        filename: String
+    ) throws {
+        try inTransaction {
+            try execute(
+                """
+                INSERT OR IGNORE INTO assets (
+                    source_fingerprint, content_hash, original_path, filename, imported_at, session_id
+                ) VALUES (?, ?, ?, ?, ?, ?);
+                """,
+                binder: { statement in
+                    sqlite3_bind_text(statement, 1, sourceFingerprint, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(statement, 2, contentHash, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(statement, 3, originalPath, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(statement, 4, filename, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_double(statement, 5, Date().timeIntervalSince1970)
+                    sqlite3_bind_int64(statement, 6, sessionID)
+                }
+            )
+            try execute(
+                """
+                UPDATE import_items
+                SET state = ?, destination_path = ?, content_hash = ?, error_message = NULL, updated_at = ?
+                WHERE id = ?;
+                """,
+                binder: { statement in
+                    sqlite3_bind_text(statement, 1, ImportItemState.done.rawValue, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(statement, 2, originalPath, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(statement, 3, contentHash, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_double(statement, 4, Date().timeIntervalSince1970)
+                    sqlite3_bind_int64(statement, 5, itemID)
+                }
+            )
+            try execute(
+                """
+                UPDATE import_sessions
+                SET imported_count = imported_count + 1
+                WHERE id = ?;
+                """,
+                binder: { statement in
+                    sqlite3_bind_int64(statement, 1, sessionID)
+                }
+            )
+        }
+    }
+
     private func decodeSession(from statement: OpaquePointer) -> ImportSessionSummary {
         let completedAt: Date?
         if sqlite3_column_type(statement, 2) == SQLITE_NULL {
@@ -388,11 +543,15 @@ actor ImportStore {
             completedAt: completedAt,
             sourceVolumePath: stringColumn(statement, index: 3),
             sourceVolumeName: stringColumn(statement, index: 4),
-            requestedCount: Int(sqlite3_column_int64(statement, 5)),
-            importedCount: Int(sqlite3_column_int64(statement, 6)),
-            duplicateCount: Int(sqlite3_column_int64(statement, 7)),
-            failedCount: Int(sqlite3_column_int64(statement, 8)),
-            isCompleted: sqlite3_column_int64(statement, 9) == 1
+            renameTemplate: stringColumn(statement, index: 5),
+            customPrefix: stringColumn(statement, index: 6),
+            destinationCollection: stringColumn(statement, index: 7),
+            metadataNote: stringColumn(statement, index: 8),
+            requestedCount: Int(sqlite3_column_int64(statement, 9)),
+            importedCount: Int(sqlite3_column_int64(statement, 10)),
+            duplicateCount: Int(sqlite3_column_int64(statement, 11)),
+            failedCount: Int(sqlite3_column_int64(statement, 12)),
+            isCompleted: sqlite3_column_int64(statement, 13) == 1
         )
     }
 
@@ -462,6 +621,93 @@ actor ImportStore {
             throw ImportFailure(message: "Failed to open import database.")
         }
         db = handle
+    }
+
+    private func ensureSessionColumns() throws {
+        try addSessionColumnIfMissing(name: "rename_template", definition: "TEXT NOT NULL DEFAULT 'original'")
+        try addSessionColumnIfMissing(name: "custom_prefix", definition: "TEXT NOT NULL DEFAULT ''")
+        try addSessionColumnIfMissing(name: "destination_collection", definition: "TEXT NOT NULL DEFAULT ''")
+        try addSessionColumnIfMissing(name: "metadata_note", definition: "TEXT NOT NULL DEFAULT ''")
+    }
+
+    private func ensureAssetColumns() throws {
+        try addAssetColumnIfMissing(name: "rating", definition: "INTEGER NOT NULL DEFAULT 0")
+        try addAssetColumnIfMissing(name: "edit_stack_pointer", definition: "TEXT NOT NULL DEFAULT ''")
+    }
+
+    private func addSessionColumnIfMissing(name: String, definition: String) throws {
+        guard !(try sessionColumns().contains(name)) else {
+            return
+        }
+        try execute("ALTER TABLE import_sessions ADD COLUMN \(name) \(definition);")
+    }
+
+    private func addAssetColumnIfMissing(name: String, definition: String) throws {
+        guard !(try assetColumns().contains(name)) else {
+            return
+        }
+        try execute("ALTER TABLE assets ADD COLUMN \(name) \(definition);")
+    }
+
+    private func sessionColumns() throws -> Set<String> {
+        let sql = "PRAGMA table_info(import_sessions);"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw lastError()
+        }
+        defer { sqlite3_finalize(statement) }
+        var names = Set<String>()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            names.insert(stringColumn(statement, index: 1))
+        }
+        return names
+    }
+
+    private func assetColumns() throws -> Set<String> {
+        let sql = "PRAGMA table_info(assets);"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw lastError()
+        }
+        defer { sqlite3_finalize(statement) }
+        var names = Set<String>()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            names.insert(stringColumn(statement, index: 1))
+        }
+        return names
+    }
+
+    private func inTransaction(_ block: () throws -> Void) throws {
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            try block()
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    private func metadataSummary(from options: ImportOptions) -> String {
+        var parts: [String] = []
+        if !options.metadata.creator.isEmpty {
+            parts.append("creator=\(options.metadata.creator)")
+        }
+        if !options.metadata.keywords.isEmpty {
+            parts.append("keywords=\(options.metadata.keywords)")
+        }
+        if !options.metadata.note.isEmpty {
+            parts.append("note=\(options.metadata.note)")
+        }
+        return parts.joined(separator: " | ")
+    }
+
+    private func persistedCollection(from options: ImportOptions) -> String {
+        let folderName = options.exportFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !folderName.isEmpty {
+            return folderName
+        }
+        return options.destinationCollection
     }
 
     private func lastError() -> ImportFailure {

@@ -2,6 +2,8 @@
 /.build
 /Packages
 /*.xcodeproj
+!/Darkroom.xcodeproj
+!/Darkroom.xcodeproj/**
 xcuserdata/
 DerivedData/
 .swiftpm/config/registries.json

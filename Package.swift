@@ -29,6 +29,20 @@ let package = Package(
             name: "darkroomTests",
             dependencies: ["darkroom"],
             path: "Tests"
+        ),
+        .plugin(
+            name: "BundleAppPlugin",
+            capability: .command(
+                intent: .custom(
+                    verb: "bundle-app",
+                    description: "Build and bundle Darkroom.app"
+                ),
+                permissions: [
+                    .writeToPackageDirectory(
+                        reason: "Creates dist/<configuration>/Darkroom.app output."
+                    )
+                ]
+            )
         )
     ]
 )
