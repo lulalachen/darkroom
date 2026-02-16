@@ -113,9 +113,9 @@ enum PhotoTag: String, Codable, CaseIterable {
     var title: String {
         switch self {
         case .keep:
-            return "Green"
+            return "Selected"
         case .reject:
-            return "Red"
+            return "Rejected"
         }
     }
 

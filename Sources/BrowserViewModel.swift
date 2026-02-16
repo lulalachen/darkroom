@@ -30,8 +30,8 @@ final class BrowserViewModel: ObservableObject {
         var title: String {
             switch self {
             case .all: return "All"
-            case .keep: return "Green"
-            case .reject: return "Red"
+            case .keep: return "Selected"
+            case .reject: return "Rejected"
             case .untagged: return "Untagged"
             }
         }
@@ -132,9 +132,9 @@ final class BrowserViewModel: ObservableObject {
     var shortcutLegend: String {
         switch shortcutProfile {
         case .classicZXC:
-            return "Shortcuts: Z = Green, X = Red, C = Clear, R = Cycle rating"
+            return "Shortcuts: Z = Selected, X = Rejected, C = Clear, R = Cycle rating"
         case .numeric120:
-            return "Shortcuts: 1 = Green, 2 = Red, 0 = Clear, R = Cycle rating"
+            return "Shortcuts: 1 = Selected, 2 = Rejected, 0 = Clear, R = Cycle rating"
         }
     }
 

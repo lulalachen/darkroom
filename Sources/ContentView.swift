@@ -221,6 +221,10 @@ struct BrowserDetailView: View {
         )
         .onAppear {
             installKeyMonitor()
+            // Prevent toolbar text field from becoming first responder on initial load.
+            DispatchQueue.main.async {
+                clearTextInputFocus()
+            }
         }
         .onDisappear {
             removeKeyMonitor()
@@ -515,7 +519,7 @@ struct FilterSegmentedControl: View {
                 .help("\(item.filter.title) (\(item.shortcut))")
             }
         }
-        .help("Filters: Cmd+1 All, Cmd+2 Green, Cmd+3 Red, Cmd+4 Untagged")
+        .help("Filters: Cmd+1 All, Cmd+2 Selected, Cmd+3 Rejected, Cmd+4 Untagged")
     }
 }
 
@@ -541,8 +545,8 @@ struct ShortcutHelpOverlay: View {
 
             Group {
                 shortcutLine("Cmd+1", "Filter: All")
-                shortcutLine("Cmd+2", "Filter: Green")
-                shortcutLine("Cmd+3", "Filter: Red")
+                shortcutLine("Cmd+2", "Filter: Selected")
+                shortcutLine("Cmd+3", "Filter: Rejected")
                 shortcutLine("Cmd+4", "Filter: Untagged")
                 shortcutLine("Cmd+A", "Select all visible photos")
                 shortcutLine("Cmd+E", "Toggle adjustments panel")
@@ -555,9 +559,9 @@ struct ShortcutHelpOverlay: View {
                 shortcutLine("R", "Cycle star rating")
                 switch shortcutProfile {
                 case .classicZXC:
-                    shortcutLine("Z / X / C", "Tag Green / Red / Clear")
+                    shortcutLine("Z / X / C", "Tag Selected / Rejected / Clear")
                 case .numeric120:
-                    shortcutLine("1 / 2 / 0", "Tag Green / Red / Clear")
+                    shortcutLine("1 / 2 / 0", "Tag Selected / Rejected / Clear")
                 }
             }
             .font(.subheadline)
@@ -664,11 +668,11 @@ struct PhotoGridPane: View {
                                                 }
                                             }
                                             .contextMenu {
-                                                Button("Tag Green") {
+                                                Button("Tag Selected") {
                                                     viewModel.select(asset)
                                                     viewModel.tagSelectedAsKeep()
                                                 }
-                                                Button("Tag Red") {
+                                                Button("Tag Rejected") {
                                                     viewModel.select(asset)
                                                     viewModel.tagSelectedAsReject()
                                                 }
@@ -1216,11 +1220,11 @@ struct PreviewPane: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                Button("Green") {
+                Button("Selected") {
                     viewModel.tagSelectedAsKeep()
                 }
 
-                Button("Red") {
+                Button("Rejected") {
                     viewModel.tagSelectedAsReject()
                 }
 
@@ -1417,8 +1421,8 @@ struct ExportStatusBar: View {
         HStack(spacing: 12) {
             Text("Total: \(viewModel.photoAssets.count)")
             Text("Visible: \(viewModel.visiblePhotoAssets.count)")
-            Text("Green: \(viewModel.keepCount)")
-            Text("Red: \(viewModel.rejectCount)")
+            Text("Selected: \(viewModel.keepCount)")
+            Text("Rejected: \(viewModel.rejectCount)")
             Text("Queued: \(viewModel.exportQueueCounts.queued)")
             Spacer()
             if let exportStatus = viewModel.exportStatus {
@@ -1441,13 +1445,13 @@ struct TagChip: View {
     var body: some View {
         switch tag {
         case .keep:
-            Label("Green", systemImage: PhotoTag.keep.symbolName)
+            Label("Selected", systemImage: PhotoTag.keep.symbolName)
                 .font(.caption)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(.green.opacity(0.2), in: Capsule())
         case .reject:
-            Label("Red", systemImage: PhotoTag.reject.symbolName)
+            Label("Rejected", systemImage: PhotoTag.reject.symbolName)
                 .font(.caption)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
@@ -1517,10 +1521,10 @@ struct ThumbnailCell: View {
             if let tag {
                 ZStack {
                     Circle()
-                        .fill(Color.white.opacity(0.9))
+                        .fill(Color.black.opacity(0.5))
                     Image(systemName: tag == .keep ? "checkmark" : "xmark")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(tag == .keep ? .green : .red)
+                        .foregroundStyle(tag == .keep ? .white : .red)
                 }
                 .frame(width: 18, height: 18)
                 .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
@@ -1528,7 +1532,8 @@ struct ThumbnailCell: View {
             }
         }
         .saturation(tag == .reject ? 0 : 1)
-        .brightness(tag == .reject ? -0.15 : 0)
+        .brightness(tag == .reject ? -0.1 : 0)
+        .opacity(tag == .reject ? 0.9 : 1)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .stroke(isSelected ? .green : .clear, lineWidth: 4)
@@ -1556,7 +1561,7 @@ struct ThumbnailCell: View {
     private var accessibilityLabel: String {
         var parts: [String] = [asset.filename]
         if let tag {
-            parts.append(tag == .keep ? "Green tagged" : "Red tagged")
+            parts.append(tag == .keep ? "Selected tagged" : "Rejected tagged")
         } else {
             parts.append("Untagged")
         }
@@ -1708,10 +1713,10 @@ struct ExportQueueSheet: View {
             HStack(alignment: .center, spacing: 12) {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        Button("Enqueue Green Tagged") {
+                        Button("Enqueue Selected Tagged") {
                             viewModel.enqueueGreenTaggedForExport()
                         }
-                        .accessibilityLabel("Add green-tagged photos to export queue")
+                        .accessibilityLabel("Add selected-tagged photos to export queue")
                         Button("Start Queue") {
                             startQueueWithValidation()
                         }
