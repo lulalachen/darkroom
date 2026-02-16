@@ -15,6 +15,8 @@ final class BrowserViewModel: ObservableObject {
     private static let exportRecentDestinationsDefaultsKey = "darkroom.exportRecentDestinations.v1"
     private static let exportQueueCacheFilename = "export-queue-cache.json"
     private static let ratingsDefaultsKey = "darkroom.asset.ratings.v1"
+    private static let userLibraryPathsDefaultsKey = "darkroom.userLibraryPaths.v1"
+    private static let starterPresetRestoreOnceDefaultsKey = "darkroom.exportStarterPresetRestoreOnce.v1"
 
     enum AssetFilter: String, CaseIterable, Identifiable {
         case all
@@ -36,6 +38,7 @@ final class BrowserViewModel: ObservableObject {
 
     @Published private(set) var volumes: [Volume] = []
     @Published private(set) var libraryVolume: Volume?
+    @Published private(set) var userLibraryVolumes: [Volume] = []
     @Published var selectedVolume: Volume? {
         didSet {
             guard selectedVolume != oldValue else { return }
@@ -78,6 +81,17 @@ final class BrowserViewModel: ObservableObject {
 
     var filteredVolumes: [Volume] {
         volumes.filter { $0.isRemovable }
+    }
+
+    var allLibraryVolumes: [Volume] {
+        var items: [Volume] = []
+        if let libraryVolume {
+            items.append(libraryVolume)
+        }
+        let builtInPath = libraryVolume?.url.standardizedFileURL.path
+        let user = userLibraryVolumes.filter { $0.url.standardizedFileURL.path != builtInPath }
+        items.append(contentsOf: user)
+        return items
     }
 
     private let volumeWatcher: VolumeWatcher
@@ -139,6 +153,7 @@ final class BrowserViewModel: ObservableObject {
         self.exportDestination.subfolderTemplate = UserDefaults.standard.string(forKey: Self.exportSubfolderTemplateDefaultsKey) ?? "{date}-{shoot}"
         self.exportDestination.shootName = UserDefaults.standard.string(forKey: Self.exportShootNameDefaultsKey) ?? "Session"
         self.exportPresets = Self.loadPersistedExportPresets() ?? ExportPreset.starterPresets
+        self.restoreMissingStarterPresetsOnceIfNeeded()
         if let selectedPresetRaw = UserDefaults.standard.string(forKey: Self.selectedExportPresetDefaultsKey),
            let selectedPresetID = UUID(uuidString: selectedPresetRaw),
            self.exportPresets.contains(where: { $0.id == selectedPresetID }) {
@@ -160,6 +175,7 @@ final class BrowserViewModel: ObservableObject {
             self.volumes = mockVolumes
             self.selectedVolume = mockVolumes.first
         } else {
+            self.userLibraryVolumes = Self.loadPersistedUserLibraries()
             bindVolumeUpdates()
             watcher.refresh()
         }
@@ -187,10 +203,16 @@ final class BrowserViewModel: ObservableObject {
                 name: "Darkroom Library",
                 isRemovable: false,
                 isInternal: true,
-                capacity: nil
+                capacity: nil,
+                isBuiltInLibrary: true,
+                isUserLibrary: false
             )
+            if userLibraryVolumes.contains(where: { $0.url.standardizedFileURL.path == paths.originalsRoot.standardizedFileURL.path }) {
+                userLibraryVolumes.removeAll { $0.url.standardizedFileURL.path == paths.originalsRoot.standardizedFileURL.path }
+                persistUserLibraries()
+            }
             if selectedVolume == nil {
-                selectedVolume = volumes.first { $0.isLikelyCameraCard } ?? libraryVolume ?? volumes.first
+                selectedVolume = preferredAutoSelectedVolume(from: volumes)
             }
             resumePendingExportsIfNeeded()
         } catch {
@@ -200,6 +222,46 @@ final class BrowserViewModel: ObservableObject {
 
     func refreshVolumes() {
         volumeWatcher.refresh()
+    }
+
+    func addUserLibraryFolder(_ folderURL: URL) {
+        let standardized = folderURL.standardizedFileURL
+        guard Self.isDirectory(at: standardized) else {
+            exportStatus = "Selected path is not a folder."
+            return
+        }
+        if let libraryVolume,
+           libraryVolume.url.standardizedFileURL.path == standardized.path {
+            selectedVolume = libraryVolume
+            return
+        }
+        if let existing = userLibraryVolumes.first(where: { $0.url.standardizedFileURL.path == standardized.path }) {
+            selectedVolume = existing
+            return
+        }
+
+        let newVolume = Volume(
+            url: standardized,
+            name: standardized.lastPathComponent,
+            isRemovable: false,
+            isInternal: true,
+            capacity: nil,
+            isBuiltInLibrary: false,
+            isUserLibrary: true
+        )
+        userLibraryVolumes.append(newVolume)
+        userLibraryVolumes.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        persistUserLibraries()
+        selectedVolume = newVolume
+    }
+
+    func removeUserLibrary(_ volume: Volume) {
+        guard volume.isUserLibrary else { return }
+        userLibraryVolumes.removeAll { $0.url.standardizedFileURL.path == volume.url.standardizedFileURL.path }
+        persistUserLibraries()
+        if selectedVolume?.url.standardizedFileURL.path == volume.url.standardizedFileURL.path {
+            selectedVolume = preferredAutoSelectedVolume(from: volumes)
+        }
     }
 
     func select(_ asset: PhotoAsset) {
@@ -507,12 +569,16 @@ final class BrowserViewModel: ObservableObject {
             .sink { [weak self] newVolumes in
                 guard let self = self else { return }
                 self.volumes = newVolumes
-                if let currentlySelected = self.selectedVolume,
-                   !newVolumes.contains(currentlySelected) {
-                    self.selectedVolume = newVolumes.first { $0.isLikelyCameraCard } ?? self.libraryVolume ?? newVolumes.first
-                } else if self.selectedVolume == nil {
-                    self.selectedVolume = newVolumes.first { $0.isLikelyCameraCard } ?? self.libraryVolume ?? newVolumes.first
+                if let currentlySelected = self.selectedVolume {
+                    if currentlySelected.isBuiltInLibrary || currentlySelected.isUserLibrary {
+                        // Keep explicit library selections; don't override them from removable volume updates.
+                        return
+                    }
+                    if currentlySelected.isRemovable, newVolumes.contains(currentlySelected) {
+                        return
+                    }
                 }
+                self.selectedVolume = self.preferredAutoSelectedVolume(from: newVolumes)
             }
             .store(in: &cancellables)
     }
@@ -757,10 +823,54 @@ final class BrowserViewModel: ObservableObject {
     }
 
     private func resumePendingExportsIfNeeded() {
-        guard !isExporting else { return }
         guard exportQueue.contains(where: { $0.state == .queued }) else { return }
-        exportStatus = "Recovered pending exports after relaunch."
-        startExportQueue()
+        exportStatus = "Recovered pending exports. Open Export Config to start manually."
+    }
+
+    private func preferredAutoSelectedVolume(from volumes: [Volume]) -> Volume? {
+        volumes.first { $0.isLikelyCameraCard } ?? volumes.first { $0.isRemovable }
+    }
+
+    private static func isDirectory(at url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+    }
+
+    private func persistUserLibraries() {
+        let paths = userLibraryVolumes.map { $0.url.standardizedFileURL.path }
+        UserDefaults.standard.set(paths, forKey: Self.userLibraryPathsDefaultsKey)
+    }
+
+    private static func loadPersistedUserLibraries() -> [Volume] {
+        let paths = UserDefaults.standard.array(forKey: userLibraryPathsDefaultsKey) as? [String] ?? []
+        var items: [Volume] = []
+        for path in paths {
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            guard isDirectory(at: url) else { continue }
+            items.append(
+                Volume(
+                    url: url,
+                    name: url.lastPathComponent,
+                    isRemovable: false,
+                    isInternal: true,
+                    capacity: nil,
+                    isBuiltInLibrary: false,
+                    isUserLibrary: true
+                )
+            )
+        }
+        return items.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
+    private func restoreMissingStarterPresetsOnceIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: Self.starterPresetRestoreOnceDefaultsKey) == false else { return }
+
+        let existingNames = Set(exportPresets.map { $0.name.lowercased() })
+        let missing = ExportPreset.starterPresets.filter { !existingNames.contains($0.name.lowercased()) }
+        if !missing.isEmpty {
+            exportPresets.append(contentsOf: missing)
+        }
+        defaults.set(true, forKey: Self.starterPresetRestoreOnceDefaultsKey)
     }
 
     private func setSelectedTag(_ tag: PhotoTag) {

@@ -32,10 +32,28 @@ actor PhotoEnumerator {
             assets.append(asset)
         }
 
-        return assets.sorted { (lhs, rhs) in
-            let leftDate = lhs.captureDate ?? .distantPast
-            let rightDate = rhs.captureDate ?? .distantPast
-            return leftDate > rightDate
+        let calendar = Calendar.current
+        return assets.sorted { lhs, rhs in
+            switch (lhs.captureDate, rhs.captureDate) {
+            case let (leftDate?, rightDate?):
+                let leftDay = calendar.startOfDay(for: leftDate)
+                let rightDay = calendar.startOfDay(for: rightDate)
+                if leftDay != rightDay {
+                    // Newer dates first.
+                    return leftDay > rightDay
+                }
+                if leftDate != rightDate {
+                    // Chronological order within each day.
+                    return leftDate < rightDate
+                }
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            case (.none, .none):
+                break
+            }
+            return lhs.filename.localizedCaseInsensitiveCompare(rhs.filename) == .orderedAscending
         }
     }
 

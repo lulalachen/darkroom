@@ -27,10 +27,13 @@ targets:
         INFOPLIST_KEY_CFBundleShortVersionString: "0.1.0"
         INFOPLIST_KEY_CFBundleVersion: "1"
         INFOPLIST_KEY_NSHighResolutionCapable: true
-        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_ALLOWED: YES
         OTHER_LDFLAGS:
           - "$(inherited)"
           - "-lsqlite3"
+      configs:
+        Release:
+          ENABLE_HARDENED_RUNTIME: YES
 
 schemes:
   Darkroom:

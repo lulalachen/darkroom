@@ -7,10 +7,11 @@ Goal: build a macOS app that accelerates a photo-editing workflow: ultra-fast SD
 - **Export:** batch export with compression presets, custom target path/folder structure.
 
 ## Status
-- **Current milestone:** M5 – Polish, Performance, and Resilience (In Progress)
-- **Last completed milestone:** M4 – Export Workflow & Delivery (Completed February 16, 2026)
-- **M4 completion:** 100% (as of February 16, 2026)
+- **Current milestone:** M5 – Polish, Performance, and Resilience (Completed February 16, 2026)
+- **Last completed milestone:** M5 – Polish, Performance, and Resilience (Completed February 16, 2026)
+- **M5 completion:** 100% (as of February 16, 2026)
 - **Product pivot:** February 16, 2026 — import/session features deprecated in favor of a single export-first workflow.
+- **Next implementation plan:** `docs/plans/m5-adjustments-export-ui-refinement.md` (Started February 16, 2026)
 - **Progress cadence:** update this section at each implementation checkpoint.
 
 ## Product Direction Update (February 16, 2026)

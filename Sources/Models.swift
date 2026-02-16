@@ -7,6 +7,26 @@ struct Volume: Identifiable, Hashable {
     let isRemovable: Bool
     let isInternal: Bool
     let capacity: Int64?
+    let isBuiltInLibrary: Bool
+    let isUserLibrary: Bool
+
+    init(
+        url: URL,
+        name: String,
+        isRemovable: Bool,
+        isInternal: Bool,
+        capacity: Int64?,
+        isBuiltInLibrary: Bool = false,
+        isUserLibrary: Bool = false
+    ) {
+        self.url = url
+        self.name = name
+        self.isRemovable = isRemovable
+        self.isInternal = isInternal
+        self.capacity = capacity
+        self.isBuiltInLibrary = isBuiltInLibrary
+        self.isUserLibrary = isUserLibrary
+    }
 
     var id: String { url.path }
 
@@ -15,6 +35,12 @@ struct Volume: Identifiable, Hashable {
     }
 
     var subtitle: String {
+        if isUserLibrary {
+            return url.path
+        }
+        if isBuiltInLibrary {
+            return "Darkroom managed library"
+        }
         let kind = isRemovable ? "Removable" : "Built-in"
         if let capacity {
             return "\(kind) • \(ByteCountFormatter.string(fromByteCount: capacity, countStyle: .file))"
@@ -23,7 +49,10 @@ struct Volume: Identifiable, Hashable {
     }
 
     var iconName: String {
-        isRemovable ? "externaldrive" : "internaldrive"
+        if isBuiltInLibrary || isUserLibrary {
+            return "folder"
+        }
+        return isRemovable ? "externaldrive" : "internaldrive"
     }
 
     var isLikelyCameraCard: Bool {
@@ -48,7 +77,9 @@ struct Volume: Identifiable, Hashable {
             name: values.volumeName ?? url.lastPathComponent,
             isRemovable: values.volumeIsRemovable ?? false,
             isInternal: values.volumeIsInternal ?? false,
-            capacity: values.volumeTotalCapacity.map { Int64($0) }
+            capacity: values.volumeTotalCapacity.map { Int64($0) },
+            isBuiltInLibrary: false,
+            isUserLibrary: false
         )
     }
 
@@ -60,8 +91,8 @@ struct Volume: Identifiable, Hashable {
 
     #if DEBUG
     static let mockVolumes: [Volume] = [
-        Volume(url: URL(fileURLWithPath: "/Volumes/SD_CARD"), name: "SD_CARD", isRemovable: true, isInternal: false, capacity: 256_000_000_000),
-        Volume(url: URL(fileURLWithPath: "/"), name: "Macintosh HD", isRemovable: false, isInternal: true, capacity: 1_000_000_000_000)
+        Volume(url: URL(fileURLWithPath: "/Volumes/SD_CARD"), name: "SD_CARD", isRemovable: true, isInternal: false, capacity: 256_000_000_000_000, isBuiltInLibrary: false, isUserLibrary: false),
+        Volume(url: URL(fileURLWithPath: "/"), name: "Macintosh HD", isRemovable: false, isInternal: true, capacity: 1_000_000_000_000, isBuiltInLibrary: false, isUserLibrary: false)
     ]
     #endif
 }

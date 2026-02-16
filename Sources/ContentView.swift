@@ -29,20 +29,48 @@ struct VolumeSidebar: View {
                     }
                 }
             }
-            if let libraryVolume = viewModel.libraryVolume {
-                Section("Library") {
-                    VolumeRow(volume: libraryVolume)
+            Section {
+                if viewModel.allLibraryVolumes.isEmpty {
+                    Text("Add a library folder to browse photos")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(viewModel.allLibraryVolumes) { volume in
+                        VolumeRow(volume: volume)
+                            .contextMenu {
+                                if volume.isUserLibrary {
+                                    Button("Remove Library") {
+                                        viewModel.removeUserLibrary(volume)
+                                    }
+                                }
+                            }
+                    }
+                }
+            } header: {
+                HStack {
+                    Text("Libraries")
+                    Spacer()
+                    Button(action: chooseLibraryFolder) {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Add library folder")
+                    .accessibilityLabel("Add library folder")
                 }
             }
         }
         .listStyle(.sidebar)
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Button(action: viewModel.refreshVolumes) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .help("Re-scan mounted volumes")
-            }
+    }
+
+    private func chooseLibraryFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = "Add Library"
+        panel.message = "Choose a folder that contains your photo folders."
+        if panel.runModal() == .OK, let url = panel.url {
+            viewModel.addUserLibraryFolder(url)
         }
     }
 }
@@ -71,6 +99,7 @@ struct BrowserDetailView: View {
     @ObservedObject var viewModel: BrowserViewModel
     @State private var keyMonitor: Any?
     @State private var showsExportQueue = false
+    @State private var showsAdjustmentsPanel = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -87,7 +116,10 @@ struct BrowserDetailView: View {
                 HSplitView {
                     PhotoGridPane(viewModel: viewModel)
                         .frame(minWidth: 260)
-                    PreviewPane(viewModel: viewModel)
+                    PreviewPane(
+                        viewModel: viewModel,
+                        showsAdjustmentsPanel: $showsAdjustmentsPanel
+                    )
                         .frame(minWidth: 360)
                 }
             }
@@ -107,6 +139,32 @@ struct BrowserDetailView: View {
             removeKeyMonitor()
         }
         .toolbar {
+            if let volume = viewModel.selectedVolume {
+                ToolbarItem(placement: .navigation) {
+                    HStack(spacing: 4) {
+                        Image(systemName: volume.iconName)
+                            .padding(.horizontal, 4)
+                            .foregroundStyle(volume.isLikelyCameraCard ? .blue : .secondary)
+
+                        Text(volume.url.path)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        Button(action: viewModel.refreshVolumes) {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .padding(.horizontal, 4)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Re-scan mounted volumes")
+                        .accessibilityLabel("Refresh volumes")
+                    }
+                    .help(volume.url.path)
+                }
+            }
+
             ToolbarItemGroup(placement: .primaryAction) {
                 Picker("Filter", selection: $viewModel.assetFilter) {
                     ForEach(BrowserViewModel.AssetFilter.allCases) { filter in
@@ -114,36 +172,43 @@ struct BrowserDetailView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 280)
+                .frame(width: 250)
 
-                Button("Green") {
-                    viewModel.tagSelectedAsKeep()
+                HStack(spacing: 4) {
+                    Text("Folder")
+                        .padding(.horizontal, 4)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+
+                    TextField(
+                        "Folder name",
+                        text: Binding(
+                            get: { viewModel.exportDestination.shootName },
+                            set: { viewModel.exportDestination.shootName = $0 }
+                        )
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 150)
+                    .accessibilityLabel("Shoot name")
+                    
+                    Button {
+                        viewModel.enqueueSelectedForExport()
+                        viewModel.startExportQueue()
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .padding(.horizontal, 4)
+                    .help("Export with current settings")
+                    .accessibilityLabel("Export with current settings")
+                    .disabled(viewModel.selectedAsset == nil || viewModel.isExporting)
+
                 }
-
-                Button("Red") {
-                    viewModel.tagSelectedAsReject()
-                }
-
-                Button("Clear") {
-                    viewModel.clearSelectedTag()
-                }
-
-                Button("Start Export") {
-                    viewModel.startExportQueue()
-                }
-
-                Button("Export Queue") {
+                .layoutPriority(2)
+                
+                Button("Custom Export") {
                     showsExportQueue = true
                 }
-                .accessibilityLabel("Open export queue")
-            }
-
-            if let volume = viewModel.selectedVolume {
-                ToolbarItem(placement: .automatic) {
-                    Text(volume.displayName)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
+                .accessibilityLabel("Open export config")
             }
         }
         .sheet(isPresented: $showsExportQueue) {
@@ -154,6 +219,15 @@ struct BrowserDetailView: View {
     private func handleKeyDown(_ event: NSEvent) -> Bool {
         guard event.type == .keyDown else { return false }
         if isTextInputFocused() { return false }
+
+        if event.modifierFlags.contains(.command),
+           !event.modifierFlags.contains(.control),
+           !event.modifierFlags.contains(.option),
+           event.charactersIgnoringModifiers?.lowercased() == "e" {
+            showsAdjustmentsPanel.toggle()
+            return true
+        }
+
         let blockedModifiers: NSEvent.ModifierFlags = [.command, .control, .option]
         if !event.modifierFlags.intersection(blockedModifiers).isEmpty {
             return false
@@ -238,7 +312,7 @@ struct EmptyStateView: View {
                 Text("No supported photos found on \(selectedVolume.displayName)")
                     .foregroundStyle(.secondary)
             } else {
-                Text("Select an SD card to preview photos")
+                Text("Select an SD card or add a library folder")
                     .foregroundStyle(.secondary)
             }
         }
@@ -249,54 +323,64 @@ struct PhotoGridPane: View {
     @ObservedObject var viewModel: BrowserViewModel
     private let spacing: CGFloat = 10
     private let horizontalPadding: CGFloat = 24
+    private let sectionSpacing: CGFloat = 12
 
     var body: some View {
         GeometryReader { geometry in
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVGrid(columns: columns(for: geometry.size.width), spacing: spacing) {
-                        ForEach(viewModel.visiblePhotoAssets) { asset in
-                            ThumbnailCell(
-                                asset: asset,
-                                isSelected: asset.id == viewModel.selectedAssetID,
-                                tag: viewModel.tag(for: asset),
-                                rating: viewModel.rating(for: asset)
-                            )
-                            .id(asset.id)
-                            .onTapGesture {
-                                viewModel.select(asset)
-                            }
-                            .contextMenu {
-                                Button("Tag Green") {
-                                    viewModel.select(asset)
-                                    viewModel.tagSelectedAsKeep()
-                                }
-                                Button("Tag Red") {
-                                    viewModel.select(asset)
-                                    viewModel.tagSelectedAsReject()
-                                }
-                                Button("Clear Tag") {
-                                    viewModel.select(asset)
-                                    viewModel.clearSelectedTag()
-                                }
-                                Divider()
-                                Button("Queue For Export") {
-                                    viewModel.select(asset)
-                                    viewModel.enqueueSelectedForExport()
-                                }
-                                Divider()
-                                Menu("Rating") {
-                                    ForEach(1...5, id: \.self) { rating in
-                                        Button(String(repeating: "★", count: rating)) {
+                    LazyVStack(alignment: .leading, spacing: sectionSpacing, pinnedViews: [.sectionHeaders]) {
+                        ForEach(groupedAssets) { section in
+                            Section {
+                                LazyVGrid(columns: columns(for: geometry.size.width), spacing: spacing) {
+                                    ForEach(section.assets) { asset in
+                                        ThumbnailCell(
+                                            asset: asset,
+                                            isSelected: asset.id == viewModel.selectedAssetID,
+                                            tag: viewModel.tag(for: asset),
+                                            rating: viewModel.rating(for: asset)
+                                        )
+                                        .id(asset.id)
+                                        .onTapGesture {
                                             viewModel.select(asset)
-                                            viewModel.setSelectedRating(rating)
+                                        }
+                                        .contextMenu {
+                                            Button("Tag Green") {
+                                                viewModel.select(asset)
+                                                viewModel.tagSelectedAsKeep()
+                                            }
+                                            Button("Tag Red") {
+                                                viewModel.select(asset)
+                                                viewModel.tagSelectedAsReject()
+                                            }
+                                            Button("Clear Tag") {
+                                                viewModel.select(asset)
+                                                viewModel.clearSelectedTag()
+                                            }
+                                            Divider()
+                                            Button("Queue For Export") {
+                                                viewModel.select(asset)
+                                                viewModel.enqueueSelectedForExport()
+                                            }
+                                            Divider()
+                                            Menu("Rating") {
+                                                ForEach(1...5, id: \.self) { rating in
+                                                    Button(String(repeating: "★", count: rating)) {
+                                                        viewModel.select(asset)
+                                                        viewModel.setSelectedRating(rating)
+                                                    }
+                                                }
+                                                Button("Clear Rating") {
+                                                    viewModel.select(asset)
+                                                    viewModel.clearSelectedRating()
+                                                }
+                                            }
                                         }
                                     }
-                                    Button("Clear Rating") {
-                                        viewModel.select(asset)
-                                        viewModel.clearSelectedRating()
-                                    }
                                 }
+                            }
+                            header: {
+                                sectionHeader(for: section.date)
                             }
                         }
                     }
@@ -334,10 +418,82 @@ struct PhotoGridPane: View {
         let count = Int((availableWidth + spacing) / (minimumCellWidth + spacing))
         viewModel.setGridColumnCount(max(1, count))
     }
+
+    private var groupedAssets: [PhotoSection] {
+        let calendar = Calendar.current
+        let grouped = Dictionary(grouping: viewModel.visiblePhotoAssets) { asset in
+            asset.captureDate.map { calendar.startOfDay(for: $0) }
+        }
+
+        let orderedDates = grouped.keys.sorted { lhs, rhs in
+            switch (lhs, rhs) {
+            case let (left?, right?):
+                return left > right
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            case (.none, .none):
+                return false
+            }
+        }
+
+        return orderedDates.map { date in
+            let assets = (grouped[date] ?? []).sorted { lhs, rhs in
+                switch (lhs.captureDate, rhs.captureDate) {
+                case let (leftDate?, rightDate?) where leftDate != rightDate:
+                    return leftDate < rightDate
+                case (.some, .none):
+                    return true
+                case (.none, .some):
+                    return false
+                default:
+                    return lhs.filename.localizedCaseInsensitiveCompare(rhs.filename) == .orderedAscending
+                }
+            }
+            return PhotoSection(date: date, assets: assets)
+        }
+    }
+
+    @ViewBuilder
+    private func sectionHeader(for date: Date?) -> some View {
+        Text(Self.sectionDateFormatter.string(from: date))
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 4)
+            .background(.thinMaterial)
+    }
+
+    private struct PhotoSection: Identifiable {
+        let date: Date?
+        let assets: [PhotoAsset]
+
+        var id: String {
+            guard let date else { return "unknown-date" }
+            return String(Int(date.timeIntervalSinceReferenceDate))
+        }
+    }
+
+    private static let sectionDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .full
+        formatter.timeStyle = .none
+        return formatter
+    }()
+}
+
+private extension DateFormatter {
+    func string(from date: Date?) -> String {
+        guard let date else { return "Unknown Date" }
+        return string(from: date)
+    }
 }
 
 struct PreviewPane: View {
     @ObservedObject var viewModel: BrowserViewModel
+    @Binding var showsAdjustmentsPanel: Bool
     @State private var sourceImage: NSImage?
     @State private var sourcePixelSize: CGSize = .zero
     @State private var previewImage: NSImage?
@@ -357,6 +513,75 @@ struct PreviewPane: View {
     @State private var persistTask: Task<Void, Never>?
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if viewModel.selectedAsset != nil {
+                if showsAdjustmentsPanel {
+                    VSplitView {
+                        previewSection
+                            .padding(.bottom, 6)
+                            .frame(minHeight: 240)
+                        adjustmentsSection
+                            .padding(.top, 6)
+                            .frame(minHeight: 240, idealHeight: 360)
+                    }
+                } else {
+                    previewSection
+                }
+            } else {
+                Text("Select a photo to preview")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .padding(16)
+        .alert("Save Preset", isPresented: $showSavePresetPrompt) {
+            TextField("Preset name", text: $savePresetName)
+            Button("Cancel", role: .cancel) { }
+            Button("Save") {
+                let name = savePresetName.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else { return }
+                Task {
+                    await AdjustmentStore.shared.savePreset(name: name, settings: settings)
+                    await reloadPresetsAndSelection(named: name)
+                }
+            }
+        }
+        .task(id: viewModel.selectedAssetID) {
+            renderTask?.cancel()
+            persistTask?.cancel()
+            guard let asset = viewModel.selectedAsset else {
+                sourceImage = nil
+                sourcePixelSize = .zero
+                previewImage = nil
+                settings = .default
+                presets = AdjustmentPreset.builtIns
+                selectedPresetID = nil
+                undoStack = []
+                redoStack = []
+                versionBSnapshot = nil
+                previewZoom = 1
+                return
+            }
+            async let loadedImage = FullImageLoader.shared.image(for: asset.url)
+            async let loadedSettings = AdjustmentStore.shared.adjustment(for: asset.url.path)
+            async let loadedPresets = AdjustmentStore.shared.presets()
+            async let versionBBookmark = AdjustmentStore.shared.bookmark(named: "Version B", for: asset.url.path)
+            let (image, storedSettings, availablePresets, versionB) = await (loadedImage, loadedSettings, loadedPresets, versionBBookmark)
+            sourcePixelSize = image?.size ?? .zero
+            sourceImage = Self.downscaledPreviewImage(from: image, maxLongEdge: 2048)
+            settings = storedSettings
+            presets = availablePresets
+            selectedPresetID = availablePresets.first(where: { $0.settings == storedSettings })?.id
+            undoStack = []
+            redoStack = []
+            versionBSnapshot = versionB?.settings
+            showOriginal = false
+            previewZoom = 1
+            schedulePreviewRender()
+        }
+    }
+
+    private var previewSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let asset = viewModel.selectedAsset {
                 ZStack {
@@ -386,79 +611,101 @@ struct PreviewPane: View {
                     TagChip(tag: viewModel.tag(for: asset))
                 }
 
-                HStack(spacing: 8) {
-                    Toggle(showOriginal ? "Original" : "Adjusted", isOn: $showOriginal)
-                        .toggleStyle(.switch)
-                        .onChange(of: showOriginal) { _ in
-                            schedulePreviewRender()
+                if !showsAdjustmentsPanel {
+                    HStack {
+                        Spacer()
+                        Button {
+                            showsAdjustmentsPanel = true
+                        } label: {
+                            Image(systemName: "chevron.up.circle.fill")
+                                .font(.title3)
+                                .foregroundStyle(.secondary)
                         }
-                    Spacer()
-                    Button("Undo") {
-                        undo()
+                        .buttonStyle(.plain)
+                        .help("Show adjustments (⌘E)")
+                        .accessibilityLabel("Show adjustments")
+                        Spacer()
                     }
-                    .disabled(undoStack.isEmpty)
+                }
+            }
+        }
+    }
 
-                    Button("Redo") {
-                        redo()
+    private var adjustmentsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Toggle(showOriginal ? "Original" : "Adjusted", isOn: $showOriginal)
+                    .toggleStyle(.switch)
+                    .onChange(of: showOriginal) { _ in
+                        schedulePreviewRender()
                     }
-                    .disabled(redoStack.isEmpty)
+                Spacer()
+                Button("Undo") {
+                    undo()
+                }
+                .disabled(undoStack.isEmpty)
 
-                    Button("Reset") {
-                        applySettings(.default)
-                    }
+                Button("Redo") {
+                    redo()
+                }
+                .disabled(redoStack.isEmpty)
 
-                    Button("Save Version B") {
-                        versionBSnapshot = settings
-                        if let asset = viewModel.selectedAsset {
-                            Task {
-                                await AdjustmentStore.shared.saveBookmark(
-                                    name: "Version B",
-                                    settings: settings,
-                                    for: asset.url.path
-                                )
-                            }
-                        }
-                    }
-
-                    Button("Apply Version B") {
-                        if let versionBSnapshot {
-                            applySettings(versionBSnapshot)
-                        }
-                    }
-                    .disabled(versionBSnapshot == nil)
+                Button("Reset") {
+                    applySettings(.default)
                 }
 
-                HStack(spacing: 8) {
-                    Picker("Preset", selection: $selectedPresetID) {
-                        Text("Custom").tag(Optional<UUID>(nil))
-                        ForEach(presets) { preset in
-                            Text(preset.name).tag(Optional(preset.id))
-                        }
-                    }
-                    .frame(maxWidth: 260)
-                    .onChange(of: selectedPresetID) { id in
-                        guard let id, let preset = presets.first(where: { $0.id == id }) else { return }
-                        applySettings(preset.settings)
-                    }
-
-                    Button("Save Preset") {
-                        savePresetName = ""
-                        showSavePresetPrompt = true
-                    }
-                    if let id = selectedPresetID,
-                       let preset = presets.first(where: { $0.id == id }),
-                       !preset.isBuiltIn {
-                        Button("Delete Preset") {
-                            Task {
-                                await AdjustmentStore.shared.deleteUserPreset(id: id)
-                                await reloadPresetsAndSelection()
-                            }
+                Button("Save Version B") {
+                    versionBSnapshot = settings
+                    if let asset = viewModel.selectedAsset {
+                        Task {
+                            await AdjustmentStore.shared.saveBookmark(
+                                name: "Version B",
+                                settings: settings,
+                                for: asset.url.path
+                            )
                         }
                     }
                 }
 
-                ScrollView {
-                    VStack(spacing: 8) {
+                Button("Apply Version B") {
+                    if let versionBSnapshot {
+                        applySettings(versionBSnapshot)
+                    }
+                }
+                .disabled(versionBSnapshot == nil)
+            }
+
+            HStack(spacing: 8) {
+                Picker("Preset", selection: $selectedPresetID) {
+                    Text("Custom").tag(Optional<UUID>(nil))
+                    ForEach(presets) { preset in
+                        Text(preset.name).tag(Optional(preset.id))
+                    }
+                }
+                .frame(maxWidth: 260)
+                .onChange(of: selectedPresetID) { id in
+                    guard let id, let preset = presets.first(where: { $0.id == id }) else { return }
+                    applySettings(preset.settings)
+                }
+
+                Button("Save Preset") {
+                    savePresetName = ""
+                    showSavePresetPrompt = true
+                }
+                if let id = selectedPresetID,
+                   let preset = presets.first(where: { $0.id == id }),
+                   !preset.isBuiltIn {
+                    Button("Delete Preset") {
+                        Task {
+                            await AdjustmentStore.shared.deleteUserPreset(id: id)
+                            await reloadPresetsAndSelection()
+                        }
+                    }
+                }
+            }
+
+            ScrollView {
+                VStack(spacing: 10) {
                         adjustmentSlider(
                             title: "Exposure",
                             value: Binding(
@@ -615,77 +862,26 @@ struct PreviewPane: View {
                             step: 0.01,
                             valueText: String(format: "%.2f", settings.cropOffsetY)
                         )
-                    }
-                }
-
-                Text(viewModel.shortcutLegend)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                HStack(spacing: 8) {
-                    Button("Green") {
-                        viewModel.tagSelectedAsKeep()
-                    }
-
-                    Button("Red") {
-                        viewModel.tagSelectedAsReject()
-                    }
-
-                    Button("Clear") {
-                        viewModel.clearSelectedTag()
-                    }
-                }
-            } else {
-                Text("Select a photo to preview")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .padding(16)
-        .alert("Save Preset", isPresented: $showSavePresetPrompt) {
-            TextField("Preset name", text: $savePresetName)
-            Button("Cancel", role: .cancel) { }
-            Button("Save") {
-                let name = savePresetName.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !name.isEmpty else { return }
-                Task {
-                    await AdjustmentStore.shared.savePreset(name: name, settings: settings)
-                    await reloadPresetsAndSelection(named: name)
                 }
             }
-        }
-        .task(id: viewModel.selectedAssetID) {
-            renderTask?.cancel()
-            persistTask?.cancel()
-            guard let asset = viewModel.selectedAsset else {
-                sourceImage = nil
-                sourcePixelSize = .zero
-                previewImage = nil
-                settings = .default
-                presets = AdjustmentPreset.builtIns
-                selectedPresetID = nil
-                undoStack = []
-                redoStack = []
-                versionBSnapshot = nil
-                previewZoom = 1
-                return
+
+            Text(viewModel.shortcutLegend)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                Button("Green") {
+                    viewModel.tagSelectedAsKeep()
+                }
+
+                Button("Red") {
+                    viewModel.tagSelectedAsReject()
+                }
+
+                Button("Clear") {
+                    viewModel.clearSelectedTag()
+                }
             }
-            async let loadedImage = FullImageLoader.shared.image(for: asset.url)
-            async let loadedSettings = AdjustmentStore.shared.adjustment(for: asset.url.path)
-            async let loadedPresets = AdjustmentStore.shared.presets()
-            async let versionBBookmark = AdjustmentStore.shared.bookmark(named: "Version B", for: asset.url.path)
-            let (image, storedSettings, availablePresets, versionB) = await (loadedImage, loadedSettings, loadedPresets, versionBBookmark)
-            sourcePixelSize = image?.size ?? .zero
-            sourceImage = Self.downscaledPreviewImage(from: image, maxLongEdge: 2048)
-            settings = storedSettings
-            presets = availablePresets
-            selectedPresetID = availablePresets.first(where: { $0.settings == storedSettings })?.id
-            undoStack = []
-            redoStack = []
-            versionBSnapshot = versionB?.settings
-            showOriginal = false
-            previewZoom = 1
-            schedulePreviewRender()
         }
     }
 
@@ -852,16 +1048,19 @@ struct PreviewPane: View {
         step: Double,
         valueText: String
     ) -> some View {
-        HStack {
+        HStack(spacing: 12) {
             Text(title)
-                .font(.caption)
+                .font(.callout.weight(.medium))
                 .foregroundStyle(.secondary)
-                .frame(width: 88, alignment: .leading)
+                .frame(width: 110, alignment: .leading)
             Slider(value: value, in: range, step: step)
+                .controlSize(.large)
             Text(valueText)
-                .font(.caption.monospacedDigit())
-                .frame(width: 70, alignment: .trailing)
+                .font(.callout.monospacedDigit())
+                .frame(width: 82, alignment: .trailing)
         }
+        .frame(minHeight: 34)
+        .padding(.vertical, 3)
     }
 }
 
