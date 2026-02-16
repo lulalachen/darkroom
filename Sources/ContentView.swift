@@ -1,14 +1,94 @@
 import AppKit
 import SwiftUI
 
+final class GrayDividerSplitView: NSSplitView {
+    override var dividerThickness: CGFloat { 1 }
+
+    override func drawDivider(in rect: NSRect) {
+        let dividerColor = NSColor.separatorColor.blended(withFraction: 0.35, of: .systemGray) ?? .systemGray
+        dividerColor.setFill()
+        rect.fill()
+    }
+}
+
+struct GrayHSplitView<Leading: View, Trailing: View>: NSViewRepresentable {
+    let leading: Leading
+    let trailing: Trailing
+
+    init(@ViewBuilder leading: () -> Leading, @ViewBuilder trailing: () -> Trailing) {
+        self.leading = leading()
+        self.trailing = trailing()
+    }
+
+    func makeNSView(context: Context) -> GrayDividerSplitView {
+        let split = GrayDividerSplitView()
+        split.isVertical = true
+        split.dividerStyle = .thin
+        split.addArrangedSubview(context.coordinator.leadingHosting)
+        split.addArrangedSubview(context.coordinator.trailingHosting)
+        return split
+    }
+
+    func updateNSView(_ nsView: GrayDividerSplitView, context: Context) {
+        context.coordinator.leadingHosting.rootView = AnyView(leading)
+        context.coordinator.trailingHosting.rootView = AnyView(trailing)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator {
+        let leadingHosting = NSHostingView(rootView: AnyView(EmptyView()))
+        let trailingHosting = NSHostingView(rootView: AnyView(EmptyView()))
+    }
+}
+
+struct GrayVSplitView<Top: View, Bottom: View>: NSViewRepresentable {
+    let top: Top
+    let bottom: Bottom
+
+    init(@ViewBuilder top: () -> Top, @ViewBuilder bottom: () -> Bottom) {
+        self.top = top()
+        self.bottom = bottom()
+    }
+
+    func makeNSView(context: Context) -> GrayDividerSplitView {
+        let split = GrayDividerSplitView()
+        split.isVertical = false
+        split.dividerStyle = .thin
+        split.addArrangedSubview(context.coordinator.topHosting)
+        split.addArrangedSubview(context.coordinator.bottomHosting)
+        return split
+    }
+
+    func updateNSView(_ nsView: GrayDividerSplitView, context: Context) {
+        context.coordinator.topHosting.rootView = AnyView(top)
+        context.coordinator.bottomHosting.rootView = AnyView(bottom)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator {
+        let topHosting = NSHostingView(rootView: AnyView(EmptyView()))
+        let bottomHosting = NSHostingView(rootView: AnyView(EmptyView()))
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject private var viewModel: BrowserViewModel
+    @State private var splitViewVisibility: NavigationSplitViewVisibility = .detailOnly
 
     var body: some View {
-        NavigationSplitView(sidebar: {
+        NavigationSplitView(columnVisibility: $splitViewVisibility, sidebar: {
             VolumeSidebar(viewModel: viewModel)
         }, detail: {
-            BrowserDetailView(viewModel: viewModel)
+            BrowserDetailView(
+                viewModel: viewModel,
+                splitViewVisibility: $splitViewVisibility
+            )
         })
         .navigationSplitViewStyle(.balanced)
     }
@@ -97,9 +177,11 @@ struct VolumeRow: View {
 
 struct BrowserDetailView: View {
     @ObservedObject var viewModel: BrowserViewModel
+    @Binding var splitViewVisibility: NavigationSplitViewVisibility
     @State private var keyMonitor: Any?
     @State private var showsExportQueue = false
     @State private var showsAdjustmentsPanel = false
+    @State private var showsShortcutHelp = false
     @State private var showsToolbarShootNameHint = false
     @FocusState private var toolbarShootNameFocused: Bool
 
@@ -115,9 +197,10 @@ struct BrowserDetailView: View {
                 FilterEmptyStateView(viewModel: viewModel)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                HSplitView {
+                GrayHSplitView {
                     PhotoGridPane(viewModel: viewModel)
                         .frame(minWidth: 260)
+                } trailing: {
                     PreviewPane(
                         viewModel: viewModel,
                         showsAdjustmentsPanel: $showsAdjustmentsPanel
@@ -131,9 +214,11 @@ struct BrowserDetailView: View {
         }
         .contentShape(Rectangle())
         .background(Color(NSColor.windowBackgroundColor))
-        .onTapGesture {
-            clearTextInputFocus()
-        }
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                clearTextInputFocus()
+            }
+        )
         .onAppear {
             installKeyMonitor()
         }
@@ -167,15 +252,13 @@ struct BrowserDetailView: View {
                 }
             }
 
-            ToolbarItemGroup(placement: .primaryAction) {
-                Picker("Filter", selection: $viewModel.assetFilter) {
-                    ForEach(BrowserViewModel.AssetFilter.allCases) { filter in
-                        Text(filter.title).tag(filter)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 250)
+            ToolbarItem(placement: .secondaryAction) {
+                FilterSegmentedControl(selected: $viewModel.assetFilter)
+                    .frame(width: 300)
+                    .padding(.horizontal, 4)
+            }
 
+            ToolbarItem(placement: .primaryAction) {
                 HStack(spacing: 4) {
                     Text("Folder")
                         .padding(.horizontal, 4)
@@ -208,22 +291,48 @@ struct BrowserDetailView: View {
                     } label: {
                         Image(systemName: "square.and.arrow.up")
                     }
-                    .padding(.horizontal, 4)
+                    .padding(.leading, 4)
                     .help("Export with current settings")
                     .accessibilityLabel("Export with current settings")
                     .disabled(viewModel.selectedAsset == nil || viewModel.isExporting)
 
                 }
                 .layoutPriority(2)
-                
-                Button("Custom Export") {
+                .padding(.horizontal, 6)
+            }
+
+            ToolbarItem(placement: .primaryAction) {
+                Button("Customize Exports") {
                     showsExportQueue = true
                 }
                 .accessibilityLabel("Open export config")
             }
+
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        showsShortcutHelp.toggle()
+                    }
+                } label: {
+                    Image(systemName: "questionmark.circle")
+                }
+                .help("Keyboard shortcuts (Cmd+H)")
+                .accessibilityLabel("Show keyboard shortcuts")
+            }
         }
         .sheet(isPresented: $showsExportQueue) {
             ExportQueueSheet(viewModel: viewModel)
+        }
+        .overlay(alignment: .topTrailing) {
+            if showsShortcutHelp {
+                ShortcutHelpOverlay(
+                    shortcutProfile: viewModel.shortcutProfile,
+                    onClose: { showsShortcutHelp = false }
+                )
+                .padding(.top, 12)
+                .padding(.trailing, 12)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
         }
     }
 
@@ -270,6 +379,36 @@ struct BrowserDetailView: View {
         }
 
         switch key {
+        case "h":
+            if event.modifierFlags.contains(.shift) { return false }
+            withAnimation(.easeInOut(duration: 0.15)) {
+                showsShortcutHelp.toggle()
+            }
+            return true
+        case "s":
+            if event.modifierFlags.contains(.shift) {
+                return false
+            }
+            withAnimation(.easeInOut(duration: 0.15)) {
+                splitViewVisibility = (splitViewVisibility == .all) ? .detailOnly : .all
+            }
+            return true
+        case "1":
+            if event.modifierFlags.contains(.shift) { return false }
+            viewModel.assetFilter = .all
+            return true
+        case "2":
+            if event.modifierFlags.contains(.shift) { return false }
+            viewModel.assetFilter = .keep
+            return true
+        case "3":
+            if event.modifierFlags.contains(.shift) { return false }
+            viewModel.assetFilter = .reject
+            return true
+        case "4":
+            if event.modifierFlags.contains(.shift) { return false }
+            viewModel.assetFilter = .untagged
+            return true
         case "e":
             if event.modifierFlags.contains(.shift) {
                 return false
@@ -325,7 +464,8 @@ struct BrowserDetailView: View {
     }
 
     private func clearTextInputFocus() {
-        guard isTextInputFocused() else { return }
+        toolbarShootNameFocused = false
+        showsToolbarShootNameHint = false
         NSApp.keyWindow?.makeFirstResponder(nil)
     }
 
@@ -340,6 +480,108 @@ struct BrowserDetailView: View {
         guard let keyMonitor else { return }
         NSEvent.removeMonitor(keyMonitor)
         self.keyMonitor = nil
+    }
+}
+
+struct FilterSegmentedControl: View {
+    @Binding var selected: BrowserViewModel.AssetFilter
+
+    private var items: [(filter: BrowserViewModel.AssetFilter, shortcut: String)] {
+        [
+            (.all, "Cmd+1"),
+            (.keep, "Cmd+2"),
+            (.reject, "Cmd+3"),
+            (.untagged, "Cmd+4")
+        ]
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(items, id: \.filter) { item in
+                Button {
+                    selected = item.filter
+                } label: {
+                    Text(item.filter.title)
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .padding(.horizontal, 8)
+                        .background(
+                            Capsule()
+                                .fill(selected == item.filter ? Color.secondary.opacity(0.24) : Color.clear)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("\(item.filter.title) (\(item.shortcut))")
+            }
+        }
+        .help("Filters: Cmd+1 All, Cmd+2 Green, Cmd+3 Red, Cmd+4 Untagged")
+    }
+}
+
+struct ShortcutHelpOverlay: View {
+    let shortcutProfile: KeyboardShortcutProfile
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Keyboard Shortcuts")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    onClose()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Close")
+            }
+
+            Group {
+                shortcutLine("Cmd+1", "Filter: All")
+                shortcutLine("Cmd+2", "Filter: Green")
+                shortcutLine("Cmd+3", "Filter: Red")
+                shortcutLine("Cmd+4", "Filter: Untagged")
+                shortcutLine("Cmd+A", "Select all visible photos")
+                shortcutLine("Cmd+E", "Toggle adjustments panel")
+                shortcutLine("Cmd+S", "Show sidebar")
+                shortcutLine("Cmd+H", "Toggle this help")
+                shortcutLine("Cmd+Z", "Undo tag edit")
+                shortcutLine("Cmd+Shift+Z", "Redo tag edit")
+                shortcutLine("Arrow keys", "Move selection")
+                shortcutLine("Shift+Click", "Range select")
+                shortcutLine("R", "Cycle star rating")
+                switch shortcutProfile {
+                case .classicZXC:
+                    shortcutLine("Z / X / C", "Tag Green / Red / Clear")
+                case .numeric120:
+                    shortcutLine("1 / 2 / 0", "Tag Green / Red / Clear")
+                }
+            }
+            .font(.subheadline)
+        }
+        .padding(14)
+        .frame(width: 340)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.2), radius: 8, y: 2)
+    }
+
+    @ViewBuilder
+    private func shortcutLine(_ key: String, _ action: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(key)
+                .font(.system(.subheadline, design: .monospaced).weight(.semibold))
+                .frame(width: 110, alignment: .leading)
+            Text(action)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
     }
 }
 
@@ -380,93 +622,131 @@ struct EmptyStateView: View {
 }
 
 struct PhotoGridPane: View {
+    enum ThumbnailDisplayMode: String, CaseIterable, Identifiable {
+        case aspectRatio = "Aspect ratio"
+        case fit = "Fit"
+
+        var id: String { rawValue }
+    }
+
     @ObservedObject var viewModel: BrowserViewModel
     private let spacing: CGFloat = 10
     private let horizontalPadding: CGFloat = 24
     private let sectionSpacing: CGFloat = 12
+    @State private var thumbnailDisplayMode: ThumbnailDisplayMode = .fit
+    @State private var thumbnailSize: Double = 160
+    @State private var lastGridWidth: CGFloat = 0
 
     var body: some View {
-        GeometryReader { geometry in
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: sectionSpacing, pinnedViews: [.sectionHeaders]) {
-                        ForEach(groupedAssets) { section in
-                            Section {
-                                LazyVGrid(columns: columns(for: geometry.size.width), spacing: spacing) {
-                                    ForEach(section.assets) { asset in
-                                        ThumbnailCell(
-                                            asset: asset,
-                                            isSelected: viewModel.selectedAssetIDs.contains(asset.id),
-                                            tag: viewModel.tag(for: asset),
-                                            rating: viewModel.rating(for: asset)
-                                        )
-                                        .id(asset.id)
-                                        .onTapGesture {
-                                            let flags = NSApp.currentEvent?.modifierFlags ?? []
-                                            if flags.contains(.shift) {
-                                                viewModel.selectRange(to: asset)
-                                            } else {
-                                                viewModel.select(asset)
-                                            }
-                                        }
-                                        .contextMenu {
-                                            Button("Tag Green") {
-                                                viewModel.select(asset)
-                                                viewModel.tagSelectedAsKeep()
-                                            }
-                                            Button("Tag Red") {
-                                                viewModel.select(asset)
-                                                viewModel.tagSelectedAsReject()
-                                            }
-                                            Button("Clear Tag") {
-                                                viewModel.select(asset)
-                                                viewModel.clearSelectedTag()
-                                            }
-                                            Divider()
-                                            Button("Queue For Export") {
-                                                viewModel.select(asset)
-                                                viewModel.enqueueSelectedForExport()
-                                            }
-                                            Divider()
-                                            Menu("Rating") {
-                                                ForEach(1...5, id: \.self) { rating in
-                                                    Button(String(repeating: "★", count: rating)) {
-                                                        viewModel.select(asset)
-                                                        viewModel.setSelectedRating(rating)
-                                                    }
-                                                }
-                                                Button("Clear Rating") {
+        VStack(spacing: 0) {
+            GeometryReader { geometry in
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: sectionSpacing, pinnedViews: [.sectionHeaders]) {
+                            ForEach(groupedAssets) { section in
+                                Section {
+                                    LazyVGrid(columns: columns(for: geometry.size.width), spacing: spacing) {
+                                        ForEach(section.assets) { asset in
+                                            ThumbnailCell(
+                                                asset: asset,
+                                                isSelected: viewModel.selectedAssetIDs.contains(asset.id),
+                                                tag: viewModel.tag(for: asset),
+                                                rating: viewModel.rating(for: asset),
+                                                displayMode: thumbnailDisplayMode
+                                            )
+                                            .id(asset.id)
+                                            .onTapGesture {
+                                                let flags = NSApp.currentEvent?.modifierFlags ?? []
+                                                if flags.contains(.shift) {
+                                                    viewModel.selectRange(to: asset)
+                                                } else {
                                                     viewModel.select(asset)
-                                                    viewModel.clearSelectedRating()
+                                                }
+                                            }
+                                            .contextMenu {
+                                                Button("Tag Green") {
+                                                    viewModel.select(asset)
+                                                    viewModel.tagSelectedAsKeep()
+                                                }
+                                                Button("Tag Red") {
+                                                    viewModel.select(asset)
+                                                    viewModel.tagSelectedAsReject()
+                                                }
+                                                Button("Clear Tag") {
+                                                    viewModel.select(asset)
+                                                    viewModel.clearSelectedTag()
+                                                }
+                                                Divider()
+                                                Button("Queue For Export") {
+                                                    viewModel.select(asset)
+                                                    viewModel.enqueueSelectedForExport()
+                                                }
+                                                Divider()
+                                                Menu("Rating") {
+                                                    ForEach(1...5, id: \.self) { rating in
+                                                        Button(String(repeating: "★", count: rating)) {
+                                                            viewModel.select(asset)
+                                                            viewModel.setSelectedRating(rating)
+                                                        }
+                                                    }
+                                                    Button("Clear Rating") {
+                                                        viewModel.select(asset)
+                                                        viewModel.clearSelectedRating()
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            }
-                            header: {
-                                sectionHeader(for: section.date)
+                                header: {
+                                    sectionHeader(for: section.date)
+                                }
                             }
                         }
+                        .padding(12)
                     }
-                    .padding(12)
+                    .onAppear {
+                        lastGridWidth = geometry.size.width
+                        updateGridConfig(for: geometry.size.width)
+                        scrollToSelection(with: proxy)
+                    }
+                    .onChange(of: viewModel.selectedAssetID) { _ in
+                        scrollToSelection(with: proxy)
+                    }
+                    .onChange(of: geometry.size.width) { newWidth in
+                        lastGridWidth = newWidth
+                        updateGridConfig(for: newWidth)
+                    }
                 }
-                .onAppear {
-                    updateGridConfig(for: geometry.size.width)
-                    scrollToSelection(with: proxy)
+            }
+            Divider()
+            HStack(spacing: 12) {
+                Picker("Preview", selection: $thumbnailDisplayMode) {
+                    ForEach(ThumbnailDisplayMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
                 }
-                .onChange(of: viewModel.selectedAssetID) { _ in
-                    scrollToSelection(with: proxy)
-                }
-                .onChange(of: geometry.size.width) { newWidth in
-                    updateGridConfig(for: newWidth)
+                .pickerStyle(.segmented)
+                .frame(width: 220)
+
+                Text("Size")
+                    .font(.body.weight(.bold))
+
+                Slider(value: $thumbnailSize, in: 140...220)
+                .frame(minWidth: 140, maxWidth: 220)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .onChange(of: thumbnailSize) { _ in
+                if lastGridWidth > 0 {
+                    updateGridConfig(for: lastGridWidth)
                 }
             }
         }
     }
 
     private func columns(for width: CGFloat) -> [GridItem] {
-        let minimumCellWidth = max(120, min(180, width / 2.6))
+        let minimumCellWidth = max(110, min(CGFloat(thumbnailSize), width - horizontalPadding))
         return [GridItem(.adaptive(minimum: minimumCellWidth), spacing: spacing)]
     }
 
@@ -478,7 +758,7 @@ struct PhotoGridPane: View {
     }
 
     private func updateGridConfig(for width: CGFloat) {
-        let minimumCellWidth = max(120, min(180, width / 2.6))
+        let minimumCellWidth = max(110, min(CGFloat(thumbnailSize), width - horizontalPadding))
         let availableWidth = max(0, width - horizontalPadding)
         let count = Int((availableWidth + spacing) / (minimumCellWidth + spacing))
         viewModel.setGridColumnCount(max(1, count))
@@ -581,10 +861,11 @@ struct PreviewPane: View {
         VStack(alignment: .leading, spacing: 12) {
             if viewModel.selectedAsset != nil {
                 if showsAdjustmentsPanel {
-                    VSplitView {
+                    GrayVSplitView {
                         previewSection
                             .padding(.bottom, 6)
                             .frame(minHeight: 240)
+                    } bottom: {
                         adjustmentsSection
                             .padding(.top, 6)
                             .frame(minHeight: 240, idealHeight: 360)
@@ -1118,7 +1399,7 @@ struct PreviewPane: View {
                 .font(.callout.weight(.medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 110, alignment: .leading)
-            Slider(value: value, in: range, step: step)
+            Slider(value: value, in: range)
                 .controlSize(.large)
             Text(valueText)
                 .font(.callout.monospacedDigit())
@@ -1186,6 +1467,7 @@ struct ThumbnailCell: View {
     let isSelected: Bool
     let tag: PhotoTag?
     let rating: Int
+    let displayMode: PhotoGridPane.ThumbnailDisplayMode
 
     @State private var image: NSImage?
     @State private var loadTask: Task<Void, Never>?
@@ -1195,12 +1477,17 @@ struct ThumbnailCell: View {
             ZStack(alignment: .bottomLeading) {
                 Rectangle()
                     .foregroundStyle(.quaternary)
-                    .aspectRatio(4/3, contentMode: .fit)
+                    .aspectRatio(containerAspectRatio, contentMode: .fit)
                     .overlay {
                         if let image {
                             Image(nsImage: image)
                                 .resizable()
-                                .scaledToFill()
+                                .if(displayMode == .fit) { view in
+                                    view.scaledToFill()
+                                }
+                                .if(displayMode == .aspectRatio) { view in
+                                    view.scaledToFit()
+                                }
                         } else {
                             ProgressView()
                                 .controlSize(.small)
@@ -1228,17 +1515,23 @@ struct ThumbnailCell: View {
             }
 
             if let tag {
-                Image(systemName: tag.symbolName)
-                    .font(.title3)
-                    .foregroundStyle(tag == .keep ? .green : .red)
-                    .padding(8)
+                ZStack {
+                    Circle()
+                        .fill(Color.white.opacity(0.9))
+                    Image(systemName: tag == .keep ? "checkmark" : "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(tag == .keep ? .green : .red)
+                }
+                .frame(width: 18, height: 18)
+                .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
+                .padding(7)
             }
         }
         .saturation(tag == .reject ? 0 : 1)
         .brightness(tag == .reject ? -0.15 : 0)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(isSelected ? .green : .clear, lineWidth: 3)
+                .stroke(isSelected ? .green : .clear, lineWidth: 4)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
@@ -1273,6 +1566,18 @@ struct ThumbnailCell: View {
         return parts.joined(separator: ", ")
     }
 
+    private var containerAspectRatio: CGFloat {
+        switch displayMode {
+        case .fit:
+            return 4 / 3
+        case .aspectRatio:
+            guard let image, image.size.width > 0, image.size.height > 0 else {
+                return 4 / 3
+            }
+            return image.size.width / image.size.height
+        }
+    }
+
     private func reloadThumbnail() {
         loadTask?.cancel()
         loadTask = Task {
@@ -1292,6 +1597,17 @@ struct ThumbnailCell: View {
             await MainActor.run {
                 image = rendered
             }
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func `if`<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
+        if condition {
+            transform(self)
+        } else {
+            self
         }
     }
 }
