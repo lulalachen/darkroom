@@ -16,6 +16,12 @@ Darkroom is a SwiftPM-based macOS app with SwiftUI UI and export pipeline logic.
 - `xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Debug -destination 'platform=macOS' -derivedDataPath dist/xcode build`: native debug build.
 - `xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Release -destination 'platform=macOS' -derivedDataPath dist/xcode build`: native release build.
 
+## Feature Review Handoff Workflow
+- When a feature is complete and ready for review, always run a native Xcode debug build:
+  `xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Debug -destination 'platform=macOS' -derivedDataPath dist/xcode build`.
+- After a successful debug build, launch the built app for review:
+  `open /Users/lulalachen/Programming/darkroom/dist/xcode/Build/Products/Debug/Darkroom.app`.
+
 ## Coding Style & Naming Conventions
 - Language: Swift 5.8+, macOS 13+.
 - Indentation: 4 spaces; keep line lengths readable.

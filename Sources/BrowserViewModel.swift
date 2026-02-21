@@ -71,6 +71,7 @@ final class BrowserViewModel: ObservableObject {
     @Published private(set) var exportQueue: [ExportQueueItem] = [] {
         didSet { Self.persistExportQueue(exportQueue) }
     }
+    @Published private(set) var activeExportRunIDs: Set<ExportQueueItem.ID> = []
     @Published private(set) var recentExportDestinations: [String] = []
     @Published var exportPresets: [ExportPreset] = ExportPreset.starterPresets {
         didSet { persistExportPresets() }
@@ -432,6 +433,28 @@ final class BrowserViewModel: ObservableObject {
         return (queued, done, failed, cancelled)
     }
 
+    var activeExportRunItems: [ExportQueueItem] {
+        exportQueue.filter { activeExportRunIDs.contains($0.id) }
+    }
+
+    var activeExportRunTotalCount: Int {
+        activeExportRunItems.count
+    }
+
+    var activeExportRunPendingCount: Int {
+        activeExportRunItems.filter { !$0.state.isTerminal }.count
+    }
+
+    var activeExportRunProcessedCount: Int {
+        max(0, activeExportRunTotalCount - activeExportRunPendingCount)
+    }
+
+    var exportToastAssets: [PhotoAsset] {
+        let pending = activeExportRunItems.filter { !$0.state.isTerminal }.map(\.asset)
+        if !pending.isEmpty { return pending }
+        return activeExportRunItems.map(\.asset)
+    }
+
     func enqueueGreenTaggedForExport() {
         enqueueForExport(assets: greenTaggedAssets, statusPrefix: "Queued")
     }
@@ -468,6 +491,7 @@ final class BrowserViewModel: ObservableObject {
         }
 
         isExporting = true
+        activeExportRunIDs = Set(queueSnapshot.map(\.id))
         exportCompletionBanner = nil
         exportStatus = "Export queue running..."
         rememberRecentDestination(exportDestination.basePath, for: preset.id)
@@ -494,6 +518,7 @@ final class BrowserViewModel: ObservableObject {
                             exportedCount: summary.exportedCount
                         )
                     }
+                    self.activeExportRunIDs = []
                     self.postExportCompletionNotification(summary: summary)
                 }
                 await StructuredLogger.shared.log(
@@ -508,6 +533,7 @@ final class BrowserViewModel: ObservableObject {
                 await MainActor.run {
                     self.isExporting = false
                     self.exportStatus = "Export failed: \(error.localizedDescription)"
+                    self.activeExportRunIDs = []
                 }
                 await StructuredLogger.shared.log(
                     event: "export_queue_failed",
@@ -523,6 +549,18 @@ final class BrowserViewModel: ObservableObject {
         guard isExporting else { return }
         Task { await exportManager.cancel() }
         exportStatus = "Cancelling export queue..."
+    }
+
+    func cancelExportQueueAndPromptOpenFolder() {
+        guard isExporting else { return }
+        cancelExportQueue()
+        let exportedCount = activeExportRunItems.filter { $0.state == .done }.count
+        if let folderPath = latestCompletedExportFolderPath(within: activeExportRunIDs) ?? latestCompletedExportFolderPath() {
+            exportCompletionBanner = ExportCompletionBanner(
+                folderPath: folderPath,
+                exportedCount: exportedCount
+            )
+        }
     }
 
     func retryFailedExports() {
@@ -542,10 +580,12 @@ final class BrowserViewModel: ObservableObject {
 
     func clearCompletedExports() {
         exportQueue.removeAll { $0.state == .done || $0.state == .cancelled }
+        activeExportRunIDs = activeExportRunIDs.intersection(Set(exportQueue.map(\.id)))
     }
 
     func removeExportItem(id: ExportQueueItem.ID) {
         exportQueue.removeAll { $0.id == id }
+        activeExportRunIDs.remove(id)
     }
 
     func revealExportedItem(_ item: ExportQueueItem) {
@@ -863,7 +903,21 @@ final class BrowserViewModel: ObservableObject {
     }
 
     private func applyExportSnapshot(_ snapshot: ExportProgressSnapshot) {
-        guard let index = exportQueue.firstIndex(where: { $0.asset.url.path == snapshot.sourcePath }) else {
+        let activeNonTerminal = exportQueue.indices.first { index in
+            let item = exportQueue[index]
+            return activeExportRunIDs.contains(item.id) &&
+                !item.state.isTerminal &&
+                item.asset.url.path == snapshot.sourcePath
+        }
+        let anyNonTerminal = exportQueue.indices.first { index in
+            let item = exportQueue[index]
+            return !item.state.isTerminal && item.asset.url.path == snapshot.sourcePath
+        }
+        let fallbackLatestMatch = exportQueue.indices.last { index in
+            exportQueue[index].asset.url.path == snapshot.sourcePath
+        }
+
+        guard let index = activeNonTerminal ?? anyNonTerminal ?? fallbackLatestMatch else {
             return
         }
         if exportQueue[index].startedAt == nil && (snapshot.state == .rendering || snapshot.state == .writing) {
@@ -879,9 +933,13 @@ final class BrowserViewModel: ObservableObject {
         }
     }
 
-    private func latestCompletedExportFolderPath() -> String? {
+    private func latestCompletedExportFolderPath(within runIDs: Set<ExportQueueItem.ID>? = nil) -> String? {
         let latestDone = exportQueue
-            .filter { $0.state == .done && $0.destinationPath != nil }
+            .filter { item in
+                item.state == .done &&
+                item.destinationPath != nil &&
+                (runIDs == nil || runIDs?.contains(item.id) == true)
+            }
             .sorted { ($0.completedAt ?? .distantPast) < ($1.completedAt ?? .distantPast) }
             .last
 

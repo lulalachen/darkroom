@@ -402,39 +402,46 @@ struct BrowserDetailView: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            if let banner = viewModel.exportCompletionBanner {
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Export Complete")
-                            .font(.subheadline.weight(.semibold))
-                        Text("\(banner.exportedCount) photo(s) exported")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    Button("Open") {
-                        viewModel.openExportCompletionFolder()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    Button {
-                        viewModel.dismissExportCompletionBanner()
-                    } label: {
-                        Image(systemName: "xmark")
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .trailing, spacing: 8) {
+                if viewModel.isExporting {
+                    ExportShuffleToast(viewModel: viewModel)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-                .padding(12)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
-                .padding(.trailing, 14)
-                .padding(.bottom, 36)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+
+                if let banner = viewModel.exportCompletionBanner {
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Export Complete")
+                                .font(.subheadline.weight(.semibold))
+                            Text("\(banner.exportedCount) photo(s) exported")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Button("Open") {
+                            viewModel.openExportCompletionFolder()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button {
+                            viewModel.dismissExportCompletionBanner()
+                        } label: {
+                            Image(systemName: "xmark")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
+            .padding(.trailing, 14)
+            .padding(.bottom, 36)
         }
     }
 
@@ -1869,6 +1876,178 @@ struct PreviewPane: View {
                 .font(.headline)
             content()
         }
+    }
+}
+
+struct ExportShuffleToast: View {
+    @ObservedObject var viewModel: BrowserViewModel
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ShuffleLogoDeck()
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Exporting Photos")
+                    .font(.subheadline.weight(.semibold))
+                Text(detailLine)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 8) {
+                Text("\(processedCount)/\(totalCount)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+
+                Button("Stop") {
+                    viewModel.cancelExportQueueAndPromptOpenFolder()
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
+                .controlSize(.small)
+            }
+        }
+        .padding(12)
+        .frame(minWidth: 300, maxWidth: 420, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Color.green.opacity(0.35), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Exporting photos. \(detailLine)")
+    }
+
+    private var totalCount: Int {
+        max(viewModel.activeExportRunTotalCount, 1)
+    }
+
+    private var processedCount: Int {
+        viewModel.activeExportRunProcessedCount
+    }
+
+    private var currentItem: ExportQueueItem? {
+        viewModel.activeExportRunItems.first(where: { $0.state == .writing || $0.state == .rendering })
+    }
+
+    private var nextQueuedItem: ExportQueueItem? {
+        viewModel.activeExportRunItems.first(where: { $0.state == .queued })
+    }
+
+    private var detailLine: String {
+        let pending = viewModel.activeExportRunPendingCount
+        let activeLabel = currentItem?.asset.filename ?? nextQueuedItem?.asset.filename ?? "Preparing next photo"
+        return "\(activeLabel) • \(pending) left in queue"
+    }
+}
+
+private struct ShufflePhotoDeck: View {
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.05)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let speed = 0.9
+            let cycle = Int(floor(t * speed))
+            let progress = (t * speed) - floor(t * speed)
+            ZStack {
+                deckCard(slot: .back, cycle: cycle, progress: progress)
+                deckCard(slot: .middle, cycle: cycle, progress: progress)
+                deckCard(slot: .front, cycle: cycle, progress: progress)
+            }
+            .frame(width: 46, height: 38)
+        }
+    }
+
+    private enum DeckSlot {
+        case back
+        case middle
+        case front
+    }
+
+    @ViewBuilder
+    private func deckCard(slot: DeckSlot, cycle: Int, progress: Double) -> some View {
+        let tint = tintFor(slot: slot, cycle: cycle)
+        let metrics = metricsFor(slot: slot, progress: progress)
+
+        RoundedRectangle(cornerRadius: 6)
+            .fill(Color.secondary.opacity(0.2))
+            .overlay {
+                ExportDeckLogoThumbnail(tint: tint)
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.white.opacity(0.72), lineWidth: 1)
+            )
+            .frame(width: 28, height: 36)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .offset(x: metrics.x, y: metrics.y)
+            .rotationEffect(.degrees(metrics.rotation))
+            .scaleEffect(metrics.scale)
+            .opacity(metrics.opacity)
+            .zIndex(metrics.zIndex)
+            .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+    }
+
+    private func tintFor(slot: DeckSlot, cycle: Int) -> Color {
+        let palette: [Color] = [.green, .cyan, .orange]
+        let shift: Int
+        switch slot {
+        case .front: shift = 0
+        case .middle: shift = 1
+        case .back: shift = 2
+        }
+        return palette[(cycle + shift) % palette.count]
+    }
+
+    private func metricsFor(slot: DeckSlot, progress: Double) -> (x: CGFloat, y: CGFloat, rotation: Double, scale: CGFloat, opacity: Double, zIndex: Double) {
+        switch slot {
+        case .back:
+            return (-7, 4, -10, 0.9, 0.9, 0)
+        case .middle:
+            return (0, 1, -2, 0.95, 0.96, 1)
+        case .front:
+            let p = CGFloat(progress)
+            let x = 6 - (14 * p)
+            let y = -1 + (5 * p)
+            let rotation = Double(8 - (18 * p))
+            let scale = 1.0 - (0.1 * p)
+            return (x, y, rotation, scale, 1, 2)
+        }
+    }
+}
+
+private typealias ShuffleLogoDeck = ShufflePhotoDeck
+
+private struct ExportDeckLogoThumbnail: View {
+    let tint: Color
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(.white)
+
+            if let appIcon = NSImage(named: NSImage.applicationIconName) {
+                Image(nsImage: appIcon)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 18, height: 18)
+            } else {
+                Image(systemName: "photo")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .overlay(
+            Rectangle()
+                .fill(tint.opacity(0.42))
+                .blendMode(.multiply)
+        )
+        .frame(width: 28, height: 36)
+        .clipped()
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }
 
