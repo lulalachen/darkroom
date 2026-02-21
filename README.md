@@ -4,34 +4,21 @@ SwiftUI macOS photo export workflow app for rapid culling, adjustments, and deli
 
 ## Build A Launchable App
 
-Use the app bundling script to produce a `.app` you can open from Finder:
+Use native Xcode build tooling to produce a `.app` you can open from Finder:
 
 ```bash
-./build-app.sh            # debug build
-./build-app.sh release    # release build
+xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Debug -destination 'platform=macOS' -derivedDataPath dist/xcode build
+xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Release -destination 'platform=macOS' -derivedDataPath dist/xcode build
 ```
 
 Output locations:
-- `dist/debug/Darkroom.app`
-- `dist/release/Darkroom.app`
+- `dist/xcode/Build/Products/Debug/Darkroom.app`
+- `dist/xcode/Build/Products/Release/Darkroom.app`
 
 Launch:
 
 ```bash
-open dist/debug/Darkroom.app
-```
-
-Notes:
-- The script runs `swift build` first.
-- It assembles a macOS app bundle and copies SwiftPM resources so `Bundle.module` works at runtime.
-
-## SwiftPM Command Integration
-
-You can run the same bundling flow through SwiftPM:
-
-```bash
-swift package --allow-writing-to-package-directory bundle-app
-swift package --allow-writing-to-package-directory bundle-app release
+open dist/xcode/Build/Products/Debug/Darkroom.app
 ```
 
 ## Native Xcode Workflow
@@ -53,5 +40,5 @@ open Darkroom.xcodeproj
 CLI build of native app target:
 
 ```bash
-xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Debug -destination 'platform=macOS' build
+xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Debug -destination 'platform=macOS' -derivedDataPath dist/xcode build
 ```

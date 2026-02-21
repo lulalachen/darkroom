@@ -6,18 +6,15 @@ Darkroom is a SwiftPM-based macOS app with SwiftUI UI and export pipeline logic.
 - `Sources/`: app code (`DarkroomApp.swift`, `ContentView.swift`, view models, export/metadata/cache managers).
 - `Sources/Resources/`: bundled assets (icons, asset catalogs).
 - `Tests/`: XCTest suites (for export workflow, cache behavior, and browser workflow).
-- `Plugins/BundleAppPlugin/`: SwiftPM command plugin used to bundle `.app` outputs.
 - `docs/plans/`: design and implementation planning notes.
-- `dist/`: generated app bundles (`debug`/`release`) after build/bundle commands.
+- `dist/xcode/`: generated app products from native Xcode CLI builds.
 
 ## Build, Test, and Development Commands
 - `swift build`: compile the package target (`darkroom`).
 - `swift test`: run all XCTest suites in `Tests/`.
-- `./build-app.sh`: build and bundle `dist/debug/Darkroom.app`.
-- `./build-app.sh release`: build and bundle `dist/release/Darkroom.app`.
-- `swift package --allow-writing-to-package-directory bundle-app [release]`: plugin-based bundling flow.
 - `xcodegen generate`: regenerate `Darkroom.xcodeproj` from `project.yml`.
-- `xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Debug -destination 'platform=macOS' build`: native Xcode CLI build.
+- `xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Debug -destination 'platform=macOS' -derivedDataPath dist/xcode build`: native debug build.
+- `xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Release -destination 'platform=macOS' -derivedDataPath dist/xcode build`: native release build.
 
 ## Coding Style & Naming Conventions
 - Language: Swift 5.8+, macOS 13+.

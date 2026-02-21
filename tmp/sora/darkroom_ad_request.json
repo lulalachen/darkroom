@@ -1,0 +1,10 @@
+{
+  "dry_run": true,
+  "request": {
+    "endpoint": "/v1/videos",
+    "model": "sora-2",
+    "prompt": "Use case: social ad\nPrimary request: Investor/influencer-style ad concept for a macOS photo workflow app focused on saving time from the very beginning of importing and selection.\nScene/background: Stylized desktop workflow environment and clean app UI mock scenes; no real people.\nSubject: A fictional photo workflow app interface showing mounted source browsing, rapid keep/reject tagging, queue-based export flow, and destination templating.\nAction: beat 1 (0-2s) chaotic multi-window workflow collapses into one clean workflow UI; beat 2 (2-5s) mounted source appears and browsing begins instantly; beat 3 (5-8s) multi-select keep/reject and undo/redo; beat 4 (8-10s) keepers auto-queue for export; beat 5 (10-12s) preset export with folder template and completion state.\nCamera: mostly locked-off UI framing with one slow push-in and one vertical pan for queue progress.\nLighting/mood: premium, focused, high-clarity product demo tone.\nColor palette: graphite, slate, electric cyan accents, warm white.\nStyle/format: polished SaaS product ad, crisp UI readability, clean motion graphics.\nTiming/beats: 12-second clip with clear sequential beats and minimal overlap.\nAudio: light modern ambient bed, no vocals.\nText (verbatim): \"Invest your focus at the start, and every step after gets faster.\", \"Win the first minutes, cut rework, and unlock higher productivity.\", \"Build your signature workflow with Darkroom.\"\nConstraints: all content suitable for all audiences; no copyrighted characters; no copyrighted music; no real people; no logos other than plain app name text; keep text legible.\nAvoid: flicker, jitter, illegible text, fast motion blur, cluttered overlays.",
+    "seconds": "12",
+    "size": "1280x720"
+  }
+}

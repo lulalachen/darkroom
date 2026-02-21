@@ -22,5 +22,5 @@ jobs:
       - name: Test
         run: swift test
 
-      - name: Bundle App
-        run: ./build-app.sh
+      - name: Build App (Release, native Xcode)
+        run: xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Release -destination 'platform=macOS' -derivedDataPath dist/xcode build

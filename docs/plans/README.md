@@ -14,10 +14,10 @@ Feel free to expand this structure with subfolders (e.g., `archive/`, `active/`)
 To build a launchable macOS app bundle while working from this repository, use:
 
 ```bash
-./build-app.sh
+xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Debug -destination 'platform=macOS' -derivedDataPath dist/xcode build
 ```
 
-The script outputs `dist/debug/Darkroom.app` (or `dist/release/Darkroom.app` when called with `release`).
+The app bundle is produced at `dist/xcode/Build/Products/Debug/Darkroom.app` (or `dist/xcode/Build/Products/Release/Darkroom.app` when using `-configuration Release`).
 
 For native Xcode app development workflow, generate the project with:
 

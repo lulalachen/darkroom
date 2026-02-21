@@ -2006,7 +2006,7 @@ struct ThumbnailCell: View {
             if let tag {
                 ZStack {
                     Circle()
-                        .fill(Color.black.opacity(0.5))
+                        .fill(tag == .keep ? .green : Color.black.opacity(0.5))
                     Image(systemName: tag == .keep ? "checkmark" : "xmark")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(tag == .keep ? .white : .red)
