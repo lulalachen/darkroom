@@ -101,6 +101,42 @@ final class BrowserViewModelExportWorkflowTests: XCTestCase {
         XCTAssertEqual(viewModel.selectedAssetIDs.count, visible.count)
     }
 
+    func testVerticalNavigationUsesNearestTargetAcrossSectionBoundaries() async throws {
+        let fixture = try makeFixture(name: "vertical-navigation-sections", photoCount: 5)
+        let firstSectionDate = Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 9)) ?? Date()
+        let secondSectionDate = Calendar.current.date(from: DateComponents(year: 2025, month: 9, day: 28)) ?? Date.distantPast
+
+        // First section: 3 items.
+        for idx in 0...2 {
+            let file = fixture.root.appending(path: "DCIM/photo-\(idx).jpg", directoryHint: .notDirectory)
+            let date = firstSectionDate.addingTimeInterval(TimeInterval(idx * 60))
+            try FileManager.default.setAttributes([.creationDate: date], ofItemAtPath: file.path)
+        }
+        // Second section: 2 items.
+        for idx in 3...4 {
+            let file = fixture.root.appending(path: "DCIM/photo-\(idx).jpg", directoryHint: .notDirectory)
+            let date = secondSectionDate.addingTimeInterval(TimeInterval((idx - 3) * 60))
+            try FileManager.default.setAttributes([.creationDate: date], ofItemAtPath: file.path)
+        }
+
+        let viewModel = BrowserViewModel(mockVolumes: [fixture.volume])
+        try await waitForAssets(in: viewModel, expectedCount: 5)
+
+        let visible = viewModel.visiblePhotoAssets
+        XCTAssertEqual(visible.count, 5)
+
+        // From section-1 col 0, move down should land on section-2 first item (not +gridColumnCount).
+        viewModel.setGridColumnCount(4)
+        viewModel.select(visible[0])
+        viewModel.selectDownAsset()
+        XCTAssertEqual(viewModel.selectedAssetID, visible[3].id)
+
+        // From section-2 item in col 1, move up should land on nearest item in previous section.
+        viewModel.select(visible[4])
+        viewModel.selectUpAsset()
+        XCTAssertEqual(viewModel.selectedAssetID, visible[1].id)
+    }
+
     private func clearQueue(in viewModel: BrowserViewModel) {
         for item in viewModel.exportQueue {
             viewModel.removeExportItem(id: item.id)

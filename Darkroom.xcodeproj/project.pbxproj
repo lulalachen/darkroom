@@ -15,6 +15,7 @@
 		3F1E4D8FE05A780FB342370F /* LibraryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61838FC7998E5721DAD32762 /* LibraryManager.swift */; };
 		53033D3219AC47A2BFCC55E0 /* PreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EC10AD3F80B89DFE0FAEB42 /* PreferencesView.swift */; };
 		638DB253F2ADEED82785ACFD /* ExportPipelineModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = F054D772144334358C6AD3F4 /* ExportPipelineModels.swift */; };
+		646EE86B5368BFE4653EAA58 /* CubeLUT.swift in Sources */ = {isa = PBXBuildFile; fileRef = D85B833EB917FFEF1DF6D60A /* CubeLUT.swift */; };
 		7741FED5175276FF9EAC8A6E /* EditingModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DD410D621478C598F87F853 /* EditingModels.swift */; };
 		7869B5E101C045201399C4F9 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 937A8604BC0ADBEE873EE233 /* ContentView.swift */; };
 		800296792CCD861C57AB49C0 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2CDF1DF78FC46491E8BAF86 /* Models.swift */; };
@@ -26,6 +27,7 @@
 		AC359CADA8E394CECCC181DB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 6CBEB482E18AD592061C0C8E /* Assets.xcassets */; };
 		AFB2A79888B02216467DE015 /* icon.json in Resources */ = {isa = PBXBuildFile; fileRef = 0907BE18CFC8B2BC3F39A261 /* icon.json */; };
 		B956D7CFD87420AF54339C65 /* BrowserViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0D11C085C368FFE53022B72 /* BrowserViewModel.swift */; };
+		BD0D38C1EBC3567A87B67A93 /* LUTLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13DE323A51AA67C58845AE9 /* LUTLibrary.swift */; };
 		CEF57184CB5DCFC8FB862E5E /* AppPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44F210003636E8EB4FF38790 /* AppPreferences.swift */; };
 		D1AB6F7E6C656DF723B8044D /* FullImageLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB0FEAAEDF7779675B2480C2 /* FullImageLoader.swift */; };
 		E86D14FFDE4F67C823936AAB /* ExportAppIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = E03976C0E06583822813D198 /* ExportAppIntents.swift */; };
@@ -57,8 +59,10 @@
 		A2CDF1DF78FC46491E8BAF86 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		B719195FB266C94839C6479B /* PreviewGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewGenerator.swift; sourceTree = "<group>"; };
 		B77B8601654713040CBAE476 /* FinderTagManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderTagManager.swift; sourceTree = "<group>"; };
+		C13DE323A51AA67C58845AE9 /* LUTLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LUTLibrary.swift; sourceTree = "<group>"; };
 		C2936075227A2BDC2ABD70B9 /* EditedThumbnailCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditedThumbnailCache.swift; sourceTree = "<group>"; };
 		D2BA30CF9D9B82DFC94C034E /* StructuredLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StructuredLogger.swift; sourceTree = "<group>"; };
+		D85B833EB917FFEF1DF6D60A /* CubeLUT.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CubeLUT.swift; sourceTree = "<group>"; };
 		DABBC4871CB2B81C844B2878 /* MetadataWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataWriter.swift; sourceTree = "<group>"; };
 		DB0FEAAEDF7779675B2480C2 /* FullImageLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullImageLoader.swift; sourceTree = "<group>"; };
 		E03976C0E06583822813D198 /* ExportAppIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportAppIntents.swift; sourceTree = "<group>"; };
@@ -99,6 +103,7 @@
 				44F210003636E8EB4FF38790 /* AppPreferences.swift */,
 				A0D11C085C368FFE53022B72 /* BrowserViewModel.swift */,
 				937A8604BC0ADBEE873EE233 /* ContentView.swift */,
+				D85B833EB917FFEF1DF6D60A /* CubeLUT.swift */,
 				8434C43B2276DF21723244E2 /* DarkroomApp.swift */,
 				C2936075227A2BDC2ABD70B9 /* EditedThumbnailCache.swift */,
 				5DD410D621478C598F87F853 /* EditingModels.swift */,
@@ -108,6 +113,7 @@
 				B77B8601654713040CBAE476 /* FinderTagManager.swift */,
 				DB0FEAAEDF7779675B2480C2 /* FullImageLoader.swift */,
 				61838FC7998E5721DAD32762 /* LibraryManager.swift */,
+				C13DE323A51AA67C58845AE9 /* LUTLibrary.swift */,
 				DABBC4871CB2B81C844B2878 /* MetadataWriter.swift */,
 				A2CDF1DF78FC46491E8BAF86 /* Models.swift */,
 				2DCF19AD16C560049BAAE6B6 /* PhotoEnumerator.swift */,
@@ -167,7 +173,7 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 2620;
+				LastUpgradeCheck = 1430;
 			};
 			buildConfigurationList = EED809B70D6138CF546BCC18 /* Build configuration list for PBXProject "Darkroom" */;
 			compatibilityVersion = "Xcode 14.0";
@@ -211,6 +217,7 @@
 				CEF57184CB5DCFC8FB862E5E /* AppPreferences.swift in Sources */,
 				B956D7CFD87420AF54339C65 /* BrowserViewModel.swift in Sources */,
 				7869B5E101C045201399C4F9 /* ContentView.swift in Sources */,
+				646EE86B5368BFE4653EAA58 /* CubeLUT.swift in Sources */,
 				AAEF1CC26BB3DA92744BE456 /* DarkroomApp.swift in Sources */,
 				9FD4E9F9E10DE47628C6AEBD /* EditedThumbnailCache.swift in Sources */,
 				7741FED5175276FF9EAC8A6E /* EditingModels.swift in Sources */,
@@ -219,6 +226,7 @@
 				638DB253F2ADEED82785ACFD /* ExportPipelineModels.swift in Sources */,
 				FABC4BE3E7FF46CBF3853C7A /* FinderTagManager.swift in Sources */,
 				D1AB6F7E6C656DF723B8044D /* FullImageLoader.swift in Sources */,
+				BD0D38C1EBC3567A87B67A93 /* LUTLibrary.swift in Sources */,
 				3F1E4D8FE05A780FB342370F /* LibraryManager.swift in Sources */,
 				E973C79EBDAF1ECC7A3767B9 /* MetadataWriter.swift in Sources */,
 				800296792CCD861C57AB49C0 /* Models.swift in Sources */,
@@ -239,10 +247,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = YES;
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				COMBINE_HIDPI_IMAGES = YES;
-				DEAD_CODE_STRIPPING = YES;
-				"DEVELOPMENT_TEAM[sdk=macosx*]" = PU4LZGVBUB;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Darkroom;
 				INFOPLIST_KEY_CFBundleIconFile = AppIcon.png;
@@ -298,11 +303,10 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_TESTABILITY = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -314,9 +318,9 @@
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.0;
@@ -357,11 +361,9 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -382,7 +384,6 @@
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
@@ -396,7 +397,6 @@
 				CODE_SIGNING_ALLOWED = YES;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				COMBINE_HIDPI_IMAGES = YES;
-				DEAD_CODE_STRIPPING = YES;
 				"DEVELOPMENT_TEAM[sdk=macosx*]" = PU4LZGVBUB;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;

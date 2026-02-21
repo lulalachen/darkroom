@@ -599,11 +599,11 @@ final class BrowserViewModel: ObservableObject {
     }
 
     func selectUpAsset() {
-        moveSelection(by: -gridColumnCount)
+        moveSelectionVertically(direction: -1)
     }
 
     func selectDownAsset() {
-        moveSelection(by: gridColumnCount)
+        moveSelectionVertically(direction: 1)
     }
 
     func setGridColumnCount(_ count: Int) {
@@ -1130,6 +1130,94 @@ final class BrowserViewModel: ObservableObject {
         selectSingleAsset(visible[targetIndex].id)
     }
 
+    private func moveSelectionVertically(direction: Int) {
+        let sections = visibleSections()
+        guard !sections.isEmpty else {
+            selectedAssetID = nil
+            selectedAssetIDs = []
+            selectionAnchorAssetID = nil
+            return
+        }
+
+        guard let selectedAssetID,
+              let current = locateAsset(selectedAssetID, in: sections) else {
+            if let firstID = sections.first?.assets.first?.id {
+                selectSingleAsset(firstID)
+            }
+            return
+        }
+
+        let columns = max(1, gridColumnCount)
+        let column = current.assetIndex % columns
+        let sameSectionTarget = current.assetIndex + (direction * columns)
+        if sameSectionTarget >= 0 && sameSectionTarget < current.section.assets.count {
+            selectSingleAsset(current.section.assets[sameSectionTarget].id)
+            return
+        }
+
+        let adjacentSectionIndex = current.sectionIndex + direction
+        guard adjacentSectionIndex >= 0, adjacentSectionIndex < sections.count else {
+            return
+        }
+        let adjacentSectionAssets = sections[adjacentSectionIndex].assets
+        guard !adjacentSectionAssets.isEmpty else { return }
+
+        if direction > 0 {
+            let targetIndex = min(column, adjacentSectionAssets.count - 1)
+            selectSingleAsset(adjacentSectionAssets[targetIndex].id)
+            return
+        }
+
+        let lastRowStart = ((adjacentSectionAssets.count - 1) / columns) * columns
+        let targetIndex = min(lastRowStart + column, adjacentSectionAssets.count - 1)
+        selectSingleAsset(adjacentSectionAssets[targetIndex].id)
+    }
+
+    private func visibleSections() -> [VisibleSection] {
+        let calendar = Calendar.current
+        let grouped = Dictionary(grouping: visiblePhotoAssets) { asset in
+            asset.captureDate.map { calendar.startOfDay(for: $0) }
+        }
+
+        let orderedDates = grouped.keys.sorted { lhs, rhs in
+            switch (lhs, rhs) {
+            case let (left?, right?):
+                return left > right
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            case (.none, .none):
+                return false
+            }
+        }
+
+        return orderedDates.map { date in
+            let assets = (grouped[date] ?? []).sorted { lhs, rhs in
+                switch (lhs.captureDate, rhs.captureDate) {
+                case let (leftDate?, rightDate?) where leftDate != rightDate:
+                    return leftDate < rightDate
+                case (.some, .none):
+                    return true
+                case (.none, .some):
+                    return false
+                default:
+                    return lhs.filename.localizedCaseInsensitiveCompare(rhs.filename) == .orderedAscending
+                }
+            }
+            return VisibleSection(date: date, assets: assets)
+        }
+    }
+
+    private func locateAsset(_ id: PhotoAsset.ID, in sections: [VisibleSection]) -> (sectionIndex: Int, assetIndex: Int, section: VisibleSection)? {
+        for (sectionIndex, section) in sections.enumerated() {
+            if let assetIndex = section.assets.firstIndex(where: { $0.id == id }) {
+                return (sectionIndex, assetIndex, section)
+            }
+        }
+        return nil
+    }
+
     private func ensureSelectedAssetVisible(defaultToFirst: Bool = false) {
         let visible = visiblePhotoAssets
         guard !visible.isEmpty else {
@@ -1223,6 +1311,13 @@ final class BrowserViewModel: ObservableObject {
             }
         }
         UserDefaults.standard.set(raw, forKey: Self.ratingsDefaultsKey)
+    }
+}
+
+private extension BrowserViewModel {
+    struct VisibleSection {
+        let date: Date?
+        let assets: [PhotoAsset]
     }
 }
 

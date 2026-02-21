@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 final class GrayDividerSplitView: NSSplitView {
     override var dividerThickness: CGFloat { 1 }
@@ -14,16 +15,32 @@ final class GrayDividerSplitView: NSSplitView {
 struct GrayHSplitView<Leading: View, Trailing: View>: NSViewRepresentable {
     let leading: Leading
     let trailing: Trailing
+    let initialLeadingFraction: CGFloat?
+    let minLeadingWidth: CGFloat?
+    let minTrailingWidth: CGFloat?
+    let maxTrailingWidth: CGFloat?
 
-    init(@ViewBuilder leading: () -> Leading, @ViewBuilder trailing: () -> Trailing) {
+    init(
+        initialLeadingFraction: CGFloat? = nil,
+        minLeadingWidth: CGFloat? = nil,
+        minTrailingWidth: CGFloat? = nil,
+        maxTrailingWidth: CGFloat? = nil,
+        @ViewBuilder leading: () -> Leading,
+        @ViewBuilder trailing: () -> Trailing
+    ) {
         self.leading = leading()
         self.trailing = trailing()
+        self.initialLeadingFraction = initialLeadingFraction
+        self.minLeadingWidth = minLeadingWidth
+        self.minTrailingWidth = minTrailingWidth
+        self.maxTrailingWidth = maxTrailingWidth
     }
 
     func makeNSView(context: Context) -> GrayDividerSplitView {
         let split = GrayDividerSplitView()
         split.isVertical = true
         split.dividerStyle = .thin
+        split.delegate = context.coordinator
         split.addArrangedSubview(context.coordinator.leadingHosting)
         split.addArrangedSubview(context.coordinator.trailingHosting)
         return split
@@ -32,15 +49,55 @@ struct GrayHSplitView<Leading: View, Trailing: View>: NSViewRepresentable {
     func updateNSView(_ nsView: GrayDividerSplitView, context: Context) {
         context.coordinator.leadingHosting.rootView = AnyView(leading)
         context.coordinator.trailingHosting.rootView = AnyView(trailing)
+        context.coordinator.minLeadingWidth = minLeadingWidth
+        context.coordinator.minTrailingWidth = minTrailingWidth
+        context.coordinator.maxTrailingWidth = maxTrailingWidth
+        guard !context.coordinator.didApplyInitialSplit,
+              let fraction = initialLeadingFraction,
+              nsView.bounds.width > 0 else { return }
+        let clampedFraction = min(max(fraction, 0.1), 0.9)
+        nsView.setPosition(nsView.bounds.width * clampedFraction, ofDividerAt: 0)
+        context.coordinator.didApplyInitialSplit = true
     }
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
 
-    final class Coordinator {
+    final class Coordinator: NSObject, NSSplitViewDelegate {
         let leadingHosting = NSHostingView(rootView: AnyView(EmptyView()))
         let trailingHosting = NSHostingView(rootView: AnyView(EmptyView()))
+        var didApplyInitialSplit = false
+        var minLeadingWidth: CGFloat?
+        var minTrailingWidth: CGFloat?
+        var maxTrailingWidth: CGFloat?
+
+        func splitView(_ splitView: NSSplitView, constrainSplitPosition proposedPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+            guard splitView.isVertical, dividerIndex == 0 else {
+                return proposedPosition
+            }
+
+            let availableWidth = splitView.bounds.width
+            let divider = splitView.dividerThickness
+            var minimumPosition: CGFloat = 0
+            var maximumPosition: CGFloat = max(0, availableWidth - divider)
+
+            if let minLeadingWidth {
+                minimumPosition = max(minimumPosition, minLeadingWidth)
+            }
+            if let minTrailingWidth {
+                maximumPosition = min(maximumPosition, availableWidth - divider - minTrailingWidth)
+            }
+            if let maxTrailingWidth {
+                minimumPosition = max(minimumPosition, availableWidth - divider - maxTrailingWidth)
+            }
+
+            if maximumPosition < minimumPosition {
+                maximumPosition = minimumPosition
+            }
+
+            return min(max(proposedPosition, minimumPosition), maximumPosition)
+        }
     }
 }
 
@@ -199,7 +256,7 @@ struct BrowserDetailView: View {
                 FilterEmptyStateView(viewModel: viewModel)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                GrayHSplitView {
+                GrayHSplitView(initialLeadingFraction: 0.4) {
                     PhotoGridPane(
                         viewModel: viewModel,
                         thumbnailDisplayMode: $thumbnailDisplayMode,
@@ -968,6 +1025,8 @@ struct PreviewPane: View {
     @State private var showSavePresetPrompt = false
     @State private var undoStack: [AdjustmentSettings] = []
     @State private var redoStack: [AdjustmentSettings] = []
+    @State private var luts: [LUTRecord] = []
+    @State private var lutImportError: String?
     @State private var versionBSnapshot: AdjustmentSettings?
     @State private var showOriginal = false
     @State private var previewZoom: CGFloat = 1
@@ -980,14 +1039,19 @@ struct PreviewPane: View {
         VStack(alignment: .leading, spacing: 12) {
             if viewModel.selectedAsset != nil {
                 if showsAdjustmentsPanel {
-                    GrayVSplitView {
+                    GrayHSplitView(
+                        minLeadingWidth: 280,
+                        minTrailingWidth: 260,
+                        maxTrailingWidth: 420
+                    ) {
                         previewSection
-                            .padding(.bottom, 6)
-                            .frame(minHeight: 240)
-                    } bottom: {
+                            .padding(.trailing, 6)
+                            .frame(maxWidth: .infinity, minHeight: 240)
+                    } trailing: {
                         adjustmentsSection
-                            .padding(.top, 6)
-                            .frame(minHeight: 240, idealHeight: 360)
+                            .padding(.leading, 6)
+                            .frame(minWidth: 260, idealWidth: 340, maxWidth: 420)
+                            .layoutPriority(1)
                     }
                 } else {
                     previewSection
@@ -1011,6 +1075,18 @@ struct PreviewPane: View {
                 }
             }
         }
+        .alert("LUT Import Failed", isPresented: Binding(
+            get: { lutImportError != nil },
+            set: { newValue in
+                if !newValue {
+                    lutImportError = nil
+                }
+            }
+        )) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(lutImportError ?? "Unknown error")
+        }
         .task(id: viewModel.selectedAssetID) {
             renderTask?.cancel()
             persistTask?.cancel()
@@ -1020,6 +1096,7 @@ struct PreviewPane: View {
                 previewImage = nil
                 settings = .default
                 presets = AdjustmentPreset.builtIns
+                luts = []
                 selectedPresetID = nil
                 undoStack = []
                 redoStack = []
@@ -1030,12 +1107,14 @@ struct PreviewPane: View {
             async let loadedImage = FullImageLoader.shared.image(for: asset.url)
             async let loadedSettings = AdjustmentStore.shared.adjustment(for: asset.url.path)
             async let loadedPresets = AdjustmentStore.shared.presets()
+            async let loadedLUTs = LUTLibrary.shared.allLUTs()
             async let versionBBookmark = AdjustmentStore.shared.bookmark(named: "Version B", for: asset.url.path)
-            let (image, storedSettings, availablePresets, versionB) = await (loadedImage, loadedSettings, loadedPresets, versionBBookmark)
+            let (image, storedSettings, availablePresets, availableLUTs, versionB) = await (loadedImage, loadedSettings, loadedPresets, loadedLUTs, versionBBookmark)
             sourcePixelSize = image?.size ?? .zero
             sourceImage = Self.downscaledPreviewImage(from: image, maxLongEdge: 2048)
             settings = storedSettings
             presets = availablePresets
+            luts = availableLUTs
             selectedPresetID = availablePresets.first(where: { $0.settings == storedSettings })?.id
             undoStack = []
             redoStack = []
@@ -1049,6 +1128,38 @@ struct PreviewPane: View {
     private var previewSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let asset = viewModel.selectedAsset {
+                HStack(spacing: 8) {
+                    Text(asset.filename)
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                        .padding(.horizontal, 12)
+                        .frame(height: 30)
+                        .background(.quaternary.opacity(0.25), in: Capsule())
+
+                    if let tag = viewModel.tag(for: asset) {
+                        PreviewTagBadge(tag: tag)
+                            .frame(height: 30)
+                    }
+
+                    Spacer()
+
+                    HStack(spacing: 8) {
+                        Button(selectButtonTitle) {
+                            viewModel.tagSelectedAsKeep()
+                        }
+
+                        Button(rejectButtonTitle) {
+                            viewModel.tagSelectedAsReject()
+                        }
+
+                        Button(clearButtonTitle) {
+                            viewModel.clearSelectedTag()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                }
+
                 ZStack {
                     Rectangle()
                         .foregroundStyle(.quaternary)
@@ -1068,21 +1179,13 @@ struct PreviewPane: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                HStack {
-                    Text(asset.filename)
-                        .font(.headline)
-                        .lineLimit(1)
-                    Spacer()
-                    TagChip(tag: viewModel.tag(for: asset))
-                }
-
                 if !showsAdjustmentsPanel {
                     HStack {
                         Spacer()
                         Button {
                             showsAdjustmentsPanel = true
                         } label: {
-                            Image(systemName: "chevron.up.circle.fill")
+                            Image(systemName: "sidebar.right")
                                 .font(.title3)
                                 .foregroundStyle(.secondary)
                         }
@@ -1098,47 +1201,62 @@ struct PreviewPane: View {
 
     private var adjustmentsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Toggle(showOriginal ? "Original" : "Adjusted", isOn: $showOriginal)
-                    .toggleStyle(.switch)
-                    .onChange(of: showOriginal) { _ in
-                        schedulePreviewRender()
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Label("Adjustments", systemImage: "slider.horizontal.3")
+                        .font(.title3.weight(.semibold))
+                    Spacer()
+                    Toggle(showOriginal ? "Original" : "Adjusted", isOn: $showOriginal)
+                        .toggleStyle(.switch)
+                        .onChange(of: showOriginal) { _ in
+                            schedulePreviewRender()
+                        }
+                }
+
+                HStack(spacing: 8) {
+                    Button("Undo") {
+                        undo()
                     }
-                Spacer()
-                Button("Undo") {
-                    undo()
-                }
-                .disabled(undoStack.isEmpty)
+                    .disabled(undoStack.isEmpty)
 
-                Button("Redo") {
-                    redo()
-                }
-                .disabled(redoStack.isEmpty)
+                    Button("Redo") {
+                        redo()
+                    }
+                    .disabled(redoStack.isEmpty)
 
-                Button("Reset") {
-                    applySettings(.default)
-                }
+                    Button("Reset") {
+                        applySettings(.default)
+                    }
 
-                Button("Save Version B") {
-                    versionBSnapshot = settings
-                    if let asset = viewModel.selectedAsset {
-                        Task {
-                            await AdjustmentStore.shared.saveBookmark(
-                                name: "Version B",
-                                settings: settings,
-                                for: asset.url.path
-                            )
+                    Button("Save Version B") {
+                        versionBSnapshot = settings
+                        if let asset = viewModel.selectedAsset {
+                            Task {
+                                await AdjustmentStore.shared.saveBookmark(
+                                    name: "Version B",
+                                    settings: settings,
+                                    for: asset.url.path
+                                )
+                            }
                         }
                     }
-                }
 
-                Button("Apply Version B") {
-                    if let versionBSnapshot {
-                        applySettings(versionBSnapshot)
+                    Button("Apply Version B") {
+                        if let versionBSnapshot {
+                            applySettings(versionBSnapshot)
+                        }
                     }
+                    .disabled(versionBSnapshot == nil)
                 }
-                .disabled(versionBSnapshot == nil)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
+            .padding(12)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 1)
+            )
 
             HStack(spacing: 8) {
                 Picker("Preset", selection: $selectedPresetID) {
@@ -1168,9 +1286,12 @@ struct PreviewPane: View {
                     }
                 }
             }
+            .padding(10)
+            .background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 10))
 
             ScrollView {
-                VStack(spacing: 10) {
+                VStack(spacing: 14) {
+                    adjustmentGroup(title: "Exposure") {
                         adjustmentSlider(
                             title: "Exposure",
                             value: Binding(
@@ -1196,53 +1317,63 @@ struct PreviewPane: View {
                             valueText: String(format: "%.2f", settings.contrast)
                         )
                         adjustmentSlider(
-                            title: "Highlights",
+                            title: "Highlights Recover",
                             value: Binding(
-                                get: { settings.highlights },
+                                get: { settings.highlightsRecover },
                                 set: { newValue in
-                                    updateSettings { $0.highlights = min(max(newValue, -1), 1) }
+                                    updateSettings { $0.highlightsRecover = min(max(newValue, 0), 1) }
                                 }
                             ),
-                            range: -1...1,
+                            range: 0...1,
                             step: 0.01,
-                            valueText: String(format: "%.2f", settings.highlights)
+                            valueText: String(format: "%.2f", settings.highlightsRecover)
                         )
                         adjustmentSlider(
-                            title: "Shadows",
+                            title: "Shadows Lift",
                             value: Binding(
-                                get: { settings.shadows },
+                                get: { settings.shadowsLift },
                                 set: { newValue in
-                                    updateSettings { $0.shadows = min(max(newValue, -1), 1) }
+                                    updateSettings { $0.shadowsLift = min(max(newValue, 0), 1) }
                                 }
                             ),
-                            range: -1...1,
+                            range: 0...1,
                             step: 0.01,
-                            valueText: String(format: "%.2f", settings.shadows)
+                            valueText: String(format: "%.2f", settings.shadowsLift)
                         )
+                    }
+
+                    Divider()
+
+                    adjustmentGroup(title: "White Balance") {
                         adjustmentSlider(
-                            title: "Temp",
+                            title: "Temp (Mired)",
                             value: Binding(
-                                get: { settings.temperature },
+                                get: { settings.temperatureMired },
                                 set: { newValue in
-                                    updateSettings { $0.temperature = min(max(newValue, -1), 1) }
+                                    updateSettings { $0.temperatureMired = min(max(newValue, -150), 150) }
                                 }
                             ),
-                            range: -1...1,
-                            step: 0.01,
-                            valueText: String(format: "%.2f", settings.temperature)
+                            range: -150...150,
+                            step: 1,
+                            valueText: String(format: "%.0f", settings.temperatureMired)
                         )
                         adjustmentSlider(
                             title: "Tint",
                             value: Binding(
-                                get: { settings.tint },
+                                get: { settings.tintShift },
                                 set: { newValue in
-                                    updateSettings { $0.tint = min(max(newValue, -1), 1) }
+                                    updateSettings { $0.tintShift = min(max(newValue, -150), 150) }
                                 }
                             ),
-                            range: -1...1,
-                            step: 0.01,
-                            valueText: String(format: "%.2f", settings.tint)
+                            range: -150...150,
+                            step: 1,
+                            valueText: String(format: "%.0f", settings.tintShift)
                         )
+                    }
+
+                    Divider()
+
+                    adjustmentGroup(title: "Color") {
                         adjustmentSlider(
                             title: "Vibrance",
                             value: Binding(
@@ -1267,6 +1398,123 @@ struct PreviewPane: View {
                             step: 0.01,
                             valueText: String(format: "%.2f", settings.saturation)
                         )
+                    }
+
+                    Divider()
+
+                    adjustmentGroup(title: "Creative") {
+                        adjustmentSlider(
+                            title: "Vintage Amount",
+                            value: Binding(
+                                get: { settings.vintageAmount },
+                                set: { newValue in
+                                    updateSettings { $0.vintageAmount = min(max(newValue, 0), 1) }
+                                }
+                            ),
+                            range: 0...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.vintageAmount)
+                        )
+                        adjustmentSlider(
+                            title: "Fade",
+                            value: Binding(
+                                get: { settings.fade },
+                                set: { newValue in
+                                    updateSettings { $0.fade = min(max(newValue, 0), 1) }
+                                }
+                            ),
+                            range: 0...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.fade)
+                        )
+                        adjustmentSlider(
+                            title: "Warm Highlights",
+                            value: Binding(
+                                get: { settings.splitToneWarmHighlights },
+                                set: { newValue in
+                                    updateSettings { $0.splitToneWarmHighlights = min(max(newValue, 0), 1) }
+                                }
+                            ),
+                            range: 0...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.splitToneWarmHighlights)
+                        )
+                        adjustmentSlider(
+                            title: "Cool Shadows",
+                            value: Binding(
+                                get: { settings.splitToneCoolShadows },
+                                set: { newValue in
+                                    updateSettings { $0.splitToneCoolShadows = min(max(newValue, 0), 1) }
+                                }
+                            ),
+                            range: 0...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.splitToneCoolShadows)
+                        )
+                    }
+
+                    Divider()
+
+                    adjustmentGroup(title: "Effects") {
+                        adjustmentSlider(
+                            title: "Grain Amount",
+                            value: Binding(
+                                get: { settings.grainAmount },
+                                set: { newValue in
+                                    updateSettings { $0.grainAmount = min(max(newValue, 0), 1) }
+                                }
+                            ),
+                            range: 0...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.grainAmount)
+                        )
+                        adjustmentSlider(
+                            title: "Grain Size",
+                            value: Binding(
+                                get: { settings.grainSize },
+                                set: { newValue in
+                                    updateSettings { $0.grainSize = min(max(newValue, 0), 1) }
+                                }
+                            ),
+                            range: 0...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.grainSize)
+                        )
+                        adjustmentSlider(
+                            title: "Vignette",
+                            value: Binding(
+                                get: { settings.vignetteAmount },
+                                set: { newValue in
+                                    updateSettings { $0.vignetteAmount = min(max(newValue, 0), 1) }
+                                }
+                            ),
+                            range: 0...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.vignetteAmount)
+                        )
+                        adjustmentSlider(
+                            title: "Contrast Soft",
+                            value: Binding(
+                                get: { settings.contrastSoftening },
+                                set: { newValue in
+                                    updateSettings { $0.contrastSoftening = min(max(newValue, 0), 1) }
+                                }
+                            ),
+                            range: 0...1,
+                            step: 0.01,
+                            valueText: String(format: "%.2f", settings.contrastSoftening)
+                        )
+                    }
+
+                    Divider()
+
+                    adjustmentGroup(title: "LUT") {
+                        lutSection
+                    }
+
+                    Divider()
+
+                    adjustmentGroup(title: "Geometry") {
                         adjustmentSlider(
                             title: "Rotate",
                             value: Binding(
@@ -1327,25 +1575,82 @@ struct PreviewPane: View {
                             step: 0.01,
                             valueText: String(format: "%.2f", settings.cropOffsetY)
                         )
+                    }
                 }
             }
 
-            Text(viewModel.shortcutLegend)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+    }
 
+    private var selectButtonTitle: String {
+        switch viewModel.shortcutProfile {
+        case .classicZXC:
+            return "Select (Z)"
+        case .numeric120:
+            return "Select (1)"
+        }
+    }
+
+    private var rejectButtonTitle: String {
+        switch viewModel.shortcutProfile {
+        case .classicZXC:
+            return "Reject (X)"
+        case .numeric120:
+            return "Reject (2)"
+        }
+    }
+
+    private var clearButtonTitle: String {
+        switch viewModel.shortcutProfile {
+        case .classicZXC:
+            return "Clear (C)"
+        case .numeric120:
+            return "Clear (0)"
+        }
+    }
+
+    @ViewBuilder
+    private var lutSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Button("Selected") {
-                    viewModel.tagSelectedAsKeep()
+                Picker(
+                    "LUT",
+                    selection: Binding(
+                        get: { settings.lutID ?? "__none__" },
+                        set: { selectedID in
+                            updateSettings { draft in
+                                draft.lutID = (selectedID == "__none__") ? nil : selectedID
+                            }
+                        }
+                    )
+                ) {
+                    Text("None").tag("__none__")
+                    ForEach(luts) { lut in
+                        Text(lut.name).tag(lut.id)
+                    }
                 }
-
-                Button("Rejected") {
-                    viewModel.tagSelectedAsReject()
+                .frame(maxWidth: .infinity)
+                Button("Import") {
+                    importLUT()
                 }
-
-                Button("Clear") {
-                    viewModel.clearSelectedTag()
-                }
+            }
+            adjustmentSlider(
+                title: "LUT Intensity",
+                value: Binding(
+                    get: { settings.lutIntensity },
+                    set: { newValue in
+                        updateSettings { $0.lutIntensity = min(max(newValue, 0), 1) }
+                    }
+                ),
+                range: 0...1,
+                step: 0.01,
+                valueText: String(format: "%.2f", settings.lutIntensity)
+            )
+            if let lutID = settings.lutID, !luts.contains(where: { $0.id == lutID }) {
+                Text("Selected LUT is missing and will be skipped.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -1373,6 +1678,31 @@ struct PreviewPane: View {
             }
             await MainActor.run {
                 self.previewImage = adjusted
+            }
+        }
+    }
+
+    private func importLUT() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.init(filenameExtension: "cube")].compactMap { $0 }
+        panel.prompt = "Import LUT"
+        panel.message = "Choose a .cube file to import."
+        guard panel.runModal() == .OK, let sourceURL = panel.url else { return }
+
+        Task {
+            do {
+                _ = try await LUTLibrary.shared.importCube(from: sourceURL)
+                let updated = await LUTLibrary.shared.allLUTs()
+                await MainActor.run {
+                    luts = updated
+                }
+            } catch {
+                await MainActor.run {
+                    lutImportError = error.localizedDescription
+                }
             }
         }
     }
@@ -1513,19 +1843,32 @@ struct PreviewPane: View {
         step: Double,
         valueText: String
     ) -> some View {
-        HStack(spacing: 12) {
-            Text(title)
-                .font(.callout.weight(.medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 110, alignment: .leading)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                Text(title)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(valueText)
+                    .font(.callout.monospacedDigit())
+            }
             Slider(value: value, in: range)
                 .controlSize(.large)
-            Text(valueText)
-                .font(.callout.monospacedDigit())
-                .frame(width: 82, alignment: .trailing)
         }
-        .frame(minHeight: 34)
+        .frame(minHeight: 52)
         .padding(.vertical, 3)
+    }
+
+    @ViewBuilder
+    private func adjustmentGroup<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.headline)
+            content()
+        }
     }
 }
 
@@ -1578,6 +1921,33 @@ struct TagChip: View {
                 .padding(.vertical, 4)
                 .background(.gray.opacity(0.2), in: Capsule())
         }
+    }
+}
+
+struct PreviewTagBadge: View {
+    let tag: PhotoTag
+
+    private var fillColor: Color {
+        switch tag {
+        case .keep:
+            return .green
+        case .reject:
+            return .red
+        }
+    }
+
+    var body: some View {
+        Label(tag.title, systemImage: tag.symbolName)
+            .font(.callout.weight(.semibold))
+            .padding(.horizontal, 12)
+            .foregroundStyle(.white)
+            .frame(height: 30)
+            .background(fillColor.gradient, in: Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(.white.opacity(0.3), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.18), radius: 4, y: 1)
     }
 }
 

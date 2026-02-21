@@ -20,7 +20,8 @@ let package = Package(
             path: "Sources",
             resources: [
                 .copy("Resources/AppIcon.icon"),
-                .copy("Resources/AppIcon.png")
+                .copy("Resources/AppIcon.png"),
+                .copy("Resources/LUT")
             ],
             linkerSettings: [
                 .linkedLibrary("sqlite3")
