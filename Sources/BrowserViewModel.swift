@@ -505,8 +505,9 @@ final class BrowserViewModel: ObservableObject {
                     preset: preset,
                     destination: destination
                 ) { [weak self] snapshot in
+                    guard let self else { return }
                     Task { @MainActor in
-                        self?.applyExportSnapshot(snapshot)
+                        self.applyExportSnapshot(snapshot)
                     }
                 }
                 await MainActor.run {
@@ -756,8 +757,9 @@ final class BrowserViewModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
+            guard let self else { return }
             Task { @MainActor in
-                self?.handleShortcutExportRequest()
+                self.handleShortcutExportRequest()
             }
         }
     }
@@ -768,8 +770,9 @@ final class BrowserViewModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
+            guard let self else { return }
             Task { @MainActor in
-                self?.applyRuntimePreferences()
+                self.applyRuntimePreferences()
             }
         }
     }
