@@ -27,10 +27,12 @@ final class VolumeWatcher: ObservableObject {
         let center = NSWorkspace.shared.notificationCenter
         let queue = OperationQueue.main
         observers.append(center.addObserver(forName: NSWorkspace.didMountNotification, object: nil, queue: queue) { [weak self] _ in
-            Task { await self?.refresh() }
+            guard let self else { return }
+            Task { @MainActor in self.refresh() }
         })
         observers.append(center.addObserver(forName: NSWorkspace.didUnmountNotification, object: nil, queue: queue) { [weak self] _ in
-            Task { await self?.refresh() }
+            guard let self else { return }
+            Task { @MainActor in self.refresh() }
         })
     }
 }

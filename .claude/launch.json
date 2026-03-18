@@ -1,0 +1,24 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Darkroom (Debug)",
+      "runtimeExecutable": "xcodebuild",
+      "runtimeArgs": [
+        "-project", "Darkroom.xcodeproj",
+        "-scheme", "Darkroom",
+        "-configuration", "Debug",
+        "-destination", "platform=macOS",
+        "-derivedDataPath", "dist/xcode",
+        "build"
+      ],
+      "port": null
+    },
+    {
+      "name": "Darkroom (swift build)",
+      "runtimeExecutable": "swift",
+      "runtimeArgs": ["build"],
+      "port": null
+    }
+  ]
+}

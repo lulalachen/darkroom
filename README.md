@@ -1,44 +1,66 @@
 # Darkroom
 
-SwiftUI macOS photo export workflow app for rapid culling, adjustments, and delivery.
+SwiftUI macOS app for rapid photo culling, adjustments, and batch export.
 
-## Build A Launchable App
+![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-blue)
+![Swift](https://img.shields.io/badge/swift-5.8%2B-orange)
 
-Use native Xcode build tooling to produce a `.app` you can open from Finder:
+## Features
+
+- **Culling** — quickly tag photos as keep or reject with keyboard shortcuts
+- **Adjustments** — exposure, contrast, highlights/shadows, white balance, vibrance, split-toning, grain, vignette, crop, and more (24 parameters)
+- **LUT support** — apply 3D color lookup tables including bundled Fujifilm film simulations
+- **Batch export** — JPEG, HEIF, TIFF, or original format with configurable resolution, quality, and color space
+- **Presets** — built-in adjustment presets (Clean, Vibrant, B&W, Vintage) and export presets (Social, Web, Print, Original)
+- **Thumbnail caching** — fast LRU cache for responsive browsing
+- **Finder integration** — tag management synced with macOS Finder
+- **Shortcuts support** — Apple Shortcuts/Siri Intents for export automation
+
+## Requirements
+
+- macOS 13.0+
+- Xcode 15+ (for native builds)
+- [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
+
+## Build
 
 ```bash
+# Generate the Xcode project
+xcodegen generate
+
+# Debug build
 xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Debug -destination 'platform=macOS' -derivedDataPath dist/xcode build
+
+# Release build
 xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Release -destination 'platform=macOS' -derivedDataPath dist/xcode build
 ```
 
-Output locations:
+Output:
 - `dist/xcode/Build/Products/Debug/Darkroom.app`
 - `dist/xcode/Build/Products/Release/Darkroom.app`
 
-Launch:
-
 ```bash
+# Launch
 open dist/xcode/Build/Products/Debug/Darkroom.app
 ```
 
-## Native Xcode Workflow
-
-This repo includes an `xcodegen` spec so you can work with a native macOS App target.
-
-Generate the project:
+## Development
 
 ```bash
-xcodegen generate
-```
+# Compile (Swift Package Manager)
+swift build
 
-Open in Xcode:
+# Run tests
+swift test
 
-```bash
+# Open in Xcode
 open Darkroom.xcodeproj
 ```
 
-CLI build of native app target:
+## Supported Formats
 
-```bash
-xcodebuild -project Darkroom.xcodeproj -scheme Darkroom -configuration Debug -destination 'platform=macOS' -derivedDataPath dist/xcode build
-```
+JPG, PNG, HEIC, HEIF, and RAW (ARW, CR2, CR3, NEF, RAF, RW2, DNG).
+
+## Library
+
+Darkroom stores adjustments and manifests in `~/Pictures/DarkroomLibrary.darkroom/`.
